@@ -1,0 +1,9 @@
+ 192.168.1.6
+node_modules/
+dist/
+target/
+.idea/
+*.iml
+.env
+.env.*
+!.env.example

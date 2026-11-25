@@ -1,8 +1,43 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
+// ADDED: Import the status board for the selected requirement.
+import WorkItemBoard from "./WorkItemBoard";
+
 const REQUIREMENTS_URL = "http://localhost:8080/api/requirements";
 const WORK_ITEMS_URL = "http://localhost:8080/api/work-items";
+
+// DRAFT PREVIEW: Use a previous successful response for local testing during Gemini outages.
+const sampleAnalysis = {
+  epics: [
+    {
+      title: "Task Assignment Workflow",
+      stories: [
+        {
+          title: "Assign task to team member",
+          description:
+            "As a Project manager, I want to assign tasks to team members, so that work is delegated appropriately.",
+          acceptanceCriteria: [
+            "The system lists all available team members for selection.",
+            "The system updates the task status to assigned.",
+            "The system notifies the assigned team member of the new task.",
+          ],
+          tasks: [
+            { title: "Implement task assignment API endpoint" },
+            { title: "Develop UI component for member selection" },
+            { title: "Write unit tests for assignment logic" },
+            { title: "Write integration tests for notification service" },
+          ],
+        },
+      ],
+    },
+  ],
+  clarificationQuestions: [
+    "Is there a limit to the number of members that can be assigned to a single task?",
+    "Does a task need to be in a specific status to be assigned?",
+    "Should the system validate availability or workload when assigning tasks?",
+  ],
+};
 
 const fieldStyle = {
   width: "100%",
@@ -41,12 +76,87 @@ function errorMessage(error) {
     : error.message;
 }
 
+// DRAFT PREVIEW: Validate model-generated fields before rendering them in React.
+function isValidDraft(analysis) {
+  const isText = (value) => typeof value === "string";
+  const isListOf = (value, check) => Array.isArray(value) && value.every(check);
+
+  return (
+    isListOf(analysis?.epics, (epic) =>
+      isText(epic?.title) &&
+      isListOf(epic.stories, (story) =>
+        isText(story?.title) &&
+        isText(story.description ?? "") &&
+        isListOf(story.acceptanceCriteria ?? [], isText) &&
+        isListOf(story.tasks ?? [], (task) => isText(task?.title))
+      )
+    ) && isListOf(analysis.clarificationQuestions ?? [], isText)
+  );
+}
+
+// DRAFT PREVIEW: Show work packages and clarification questions for review.
+function DraftPreview({ analysis, isSample }) {
+  const questions = analysis.clarificationQuestions ?? [];
+
+  return (
+    <section aria-labelledby="draft-heading">
+      <h2 id="draft-heading">{isSample ? "Sample draft" : "Generated draft"}</h2>
+      <p role="status">Draft received. Epics found: {analysis.epics.length}.</p>
+
+      {analysis.epics.map((epic, epicIndex) => (
+        <article key={epicIndex} style={cardStyle}>
+          <h3>Epic: {epic.title}</h3>
+          {epic.stories.map((story, storyIndex) => {
+            const criteria = story.acceptanceCriteria ?? [];
+            const tasks = story.tasks ?? [];
+            return (
+              <section key={storyIndex}>
+                <h4>Story: {story.title}</h4>
+                {story.description && <p>{story.description}</p>}
+                {criteria.length > 0 && (
+                  <>
+                    <h5>Acceptance criteria</h5>
+                    <ul>
+                      {criteria.map((criterion, index) => <li key={index}>{criterion}</li>)}
+                    </ul>
+                  </>
+                )}
+                {tasks.length > 0 && (
+                  <>
+                    <h5>Tasks</h5>
+                    <ul>
+                      {tasks.map((task, index) => <li key={index}>{task.title}</li>)}
+                    </ul>
+                  </>
+                )}
+              </section>
+            );
+          })}
+        </article>
+      ))}
+
+      {questions.length > 0 && (
+        <>
+          <h3>Clarification questions</h3>
+          <ul>
+            {questions.map((question, index) => <li key={index}>{question}</li>)}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [projectName, setProjectName] = useState("");
   const [requirement, setRequirement] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // DRAFT GENERATION: Store the AI response and track the request in progress.
+  const [draft, setDraft] = useState(null);
+  const [generating, setGenerating] = useState(false);
 
   const [requirements, setRequirements] = useState([]);
   const [listLoading, setListLoading] = useState(true);
@@ -129,10 +239,61 @@ function App() {
     }
 
     try {
-      setRequirement(await file.text());
+      const fileText = await file.text();
+      // DRAFT GENERATION: Clear the draft when the upload replaces the requirement.
+      setDraft(null);
+      setRequirement(fileText);
     } catch {
       setError("Could not read the file. Please try again.");
     }
+  }
+
+  // DRAFT GENERATION: Send the current form to the analysis endpoint and parse its response.
+  async function handleGenerateDraft() {
+    const inputs = {
+      projectName: projectName.trim(),
+      requirement: requirement.trim(),
+    };
+
+    setError("");
+    setDraft(null);
+    setGenerating(true);
+
+    try {
+      const data = await requestJson(`${REQUIREMENTS_URL}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(inputs),
+      });
+
+      const analysis = JSON.parse(data?.analysis);
+      if (!isValidDraft(analysis)) {
+        throw new Error("The backend returned an unexpected draft format.");
+      }
+
+      setDraft({ inputs, analysis });
+    } catch (error) {
+      setError(
+        error instanceof SyntaxError
+          ? "The backend returned invalid JSON for the draft."
+          : errorMessage(error)
+      );
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  // DRAFT PREVIEW: Load the sample without contacting the analysis endpoint.
+  function handleLoadSampleDraft() {
+    setError("");
+    setDraft({
+      inputs: {
+        projectName: projectName.trim(),
+        requirement: requirement.trim(),
+      },
+      analysis: sampleAnalysis,
+      isSample: true,
+    });
   }
 
   async function handleSubmit(event) {
@@ -203,7 +364,15 @@ function App() {
     (item) => item.type === "EPIC"
   );
 
-  const busy = listLoading || loading || workSaving;
+  // DRAFT GENERATION: Disable form actions while analysis is running.
+  const busy = listLoading || loading || workSaving || generating;
+
+  // DRAFT GENERATION: Only show a response for the current form values.
+  const currentDraft =
+    draft?.inputs.projectName === projectName.trim() &&
+    draft.inputs.requirement === requirement.trim()
+      ? draft
+      : null;
 
   // ADDED: Save a work package through the new Java API.
   async function handleCreateWorkItem(event) {
@@ -299,6 +468,7 @@ function App() {
             onChange={(event) => {
               setProjectName(event.target.value);
               setResult(null);
+              setDraft(null); // DRAFT GENERATION: Discard the previous draft when this input changes.
             }}
           />
 
@@ -324,6 +494,7 @@ function App() {
             onChange={(event) => {
               setRequirement(event.target.value);
               setResult(null);
+              setDraft(null); // DRAFT GENERATION: Discard the previous draft when this input changes.
             }}
           />
 
@@ -341,7 +512,31 @@ function App() {
           >
             {loading ? "Saving..." : "Save requirement"}
           </button>
+
+          {/* DRAFT GENERATION: Request analysis without submitting the save form. */}
+          <button
+            type="button"
+            onClick={handleGenerateDraft}
+            disabled={busy || !projectName.trim() || !requirement.trim()}
+          >
+            {generating ? "Generating..." : "Generate draft"}
+          </button>
+
+          {/* DRAFT PREVIEW: Offer the sample only while running the dev server. */}
+          {import.meta.env.DEV && (
+            <button type="button" onClick={handleLoadSampleDraft} disabled={busy}>
+              Load sample draft
+            </button>
+          )}
         </form>
+
+        {/* DRAFT PREVIEW: Render the full sample or generated response. */}
+        {currentDraft && (
+          <DraftPreview
+            analysis={currentDraft.analysis}
+            isSample={currentDraft.isSample}
+          />
+        )}
 
         {result && (
           <p role="status">
@@ -572,6 +767,11 @@ function App() {
           );
         })}
       </section>
+
+      {/* ADDED: Show the selected requirement’s work packages on the status board. */}
+      {selectedRequirementId && !listLoading && !listError && (
+        <WorkItemBoard workItems={selectedItems} />
+      )}
 
       <section>
         <h2>Saved Requirements ({requirements.length})</h2>
