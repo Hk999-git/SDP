@@ -4,7 +4,6 @@ import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
-import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
@@ -24,13 +23,6 @@ public interface WorkItemRepository
     List<WorkItem> findMemberTasks(Long requirementId, WorkItem.Type type, TeamMember member);
 
     List<WorkItem> findByRequirement_IdAndTypeOrderByIdAsc(Long requirementId, WorkItem.Type type);
-
-    @Query("""
-            select item.id from WorkItem item
-            where item.type = :type and item.status <> :done
-              and item.dueDate < :today and item.assignee is not null
-            """)
-    List<Long> findOverdueIds(WorkItem.Type type, WorkItem.Status done, LocalDate today);
 
     // ADDED: Get all work items for a business requirement.
     List<WorkItem> findByRequirement_IdOrderByIdAsc(

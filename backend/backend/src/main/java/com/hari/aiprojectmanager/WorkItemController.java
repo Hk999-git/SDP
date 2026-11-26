@@ -28,20 +28,17 @@ public class WorkItemController {
     private final RequirementRepository requirementRepository;
     private final TaskCommentRepository taskCommentRepository;
     private final TaskStatusChangeRepository taskStatusChanges;
-    private final TaskNotifications notifications;
 
     public WorkItemController(
             WorkItemRepository workItemRepository,
             RequirementRepository requirementRepository,
             TaskCommentRepository taskCommentRepository,
-            TaskStatusChangeRepository taskStatusChanges,
-            TaskNotifications notifications) {
+            TaskStatusChangeRepository taskStatusChanges) {
 
         this.workItemRepository = workItemRepository;
         this.requirementRepository = requirementRepository;
         this.taskCommentRepository = taskCommentRepository;
         this.taskStatusChanges = taskStatusChanges;
-        this.notifications = notifications;
     }
 
     // ADDED: Data received when creating a work item.
@@ -167,7 +164,6 @@ public class WorkItemController {
         account.requireTaskAccess(task);
         TeamMember author = account.isManager() ? TeamMember.MANAGER : account.member();
         TaskComment comment = taskCommentRepository.save(new TaskComment(task, author, request.body().trim()));
-        notifications.queueComment(task, comment);
         return toCommentResponse(comment, taskCommentRepository.countByTask_Id(id));
     }
 

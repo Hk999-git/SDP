@@ -400,6 +400,10 @@ button:disabled { background: #e5eaf1; color: #526179; cursor: not-allowed; }
 .workspace-task-table a:hover { text-decoration: underline; }
 .task-key { font: 650 .71rem ui-monospace, Consolas, monospace; letter-spacing: .015em; color: #526179; }
 .workspace-task-table .task-key { margin-right: .4rem; }
+.workspace-task-table .workload-status {
+  display: inline-block;
+  white-space: nowrap;
+}
 .workload-status[data-status="BLOCKED"] { background: #ffe8ee; color: #ad163d; }
 .due-date { display: inline-flex; align-items: center; gap: .25rem; white-space: nowrap; color: #526179; font-size: .73rem; }
 .due-date[data-overdue="true"] { color: #ad163d; font-weight: 680; }
