@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 
 import { taskStatuses as columns } from "./taskStatuses";
 
@@ -108,7 +108,7 @@ export default function WorkItemBoard({
                 <p className="work-item-board__muted">No tasks</p>
               ) : (
                 <ul className="work-item-board__cards">
-                  {items.map(({ id, title, priority, parentId, assignee }) => {
+                  {items.map(({ id, title, priority, parentId, assignee, contributorName }) => {
                     const parent = itemsById.get(parentId);
                     return (
                       <li className="work-item-board__card" key={id}>
@@ -125,6 +125,9 @@ export default function WorkItemBoard({
                           <p className="work-item-board__parent work-item-board__muted">
                             Story: {parent.title}
                           </p>
+                        )}
+                        {contributorName && (
+                          <p className="work-item-board__parent work-item-board__muted">Contributed by: {contributorName}</p>
                         )}
                         {onTaskUpdate && (
                           <label className="work-item-board__field">

@@ -68,6 +68,9 @@ public class WorkItem {
     @Column(name = "assignee")
     private TeamMember assignee;
 
+    @Enumerated(EnumType.STRING)
+    private TeamMember contributor;
+
     // ADDED: Original business requirement behind this work item.
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "requirement_id", nullable = false)
@@ -150,6 +153,17 @@ public class WorkItem {
 
     public void setAssignee(TeamMember assignee) {
         this.assignee = assignee;
+        if (contributor == assignee) {
+            contributor = null;
+        }
+    }
+
+    public TeamMember getContributor() {
+        return contributor;
+    }
+
+    public void setContributor(TeamMember contributor) {
+        this.contributor = contributor;
     }
 
     public Requirement getRequirement() {

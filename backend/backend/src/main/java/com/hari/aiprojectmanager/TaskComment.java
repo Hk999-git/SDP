@@ -34,6 +34,7 @@ class TaskComment {
     }
 
     Long id() { return id; }
+    WorkItem task() { return task; }
     TeamMember author() { return author; }
     String body() { return body; }
     Instant createdAt() { return createdAt; }

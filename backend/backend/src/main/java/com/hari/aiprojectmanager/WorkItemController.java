@@ -1,6 +1,7 @@
 package com.hari.aiprojectmanager;
 
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
@@ -20,6 +21,8 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/work-items")
 public class WorkItemController {
+
+    private static final int COMMENT_PAGE_SIZE = 10;
 
     private final WorkItemRepository workItemRepository;
     private final RequirementRepository requirementRepository;
@@ -63,6 +66,9 @@ public class WorkItemController {
             Long requirementId,
             Long parentId,
             TeamMember assignee,
+            String assigneeName,
+            TeamMember contributor,
+            String contributorName,
             Instant createdAt,
             LocalDate dueDate,
             BigDecimal estimatedHours,
@@ -71,6 +77,7 @@ public class WorkItemController {
     ) {}
 
     public record AssigneeRequest(TeamMember assignee) {}
+    public record ContributorRequest(TeamMember contributor) {}
 
     public record StatusRequest(WorkItem.Status status, TeamMember completedBy) {}
     public record StatusActivity(Long taskId, WorkItem.Status previousStatus,
@@ -80,6 +87,23 @@ public class WorkItemController {
     public record TaskCommentRequest(String body) {}
     public record TaskCommentResponse(Long id, TeamMember author, String authorName, String body,
                                       Instant createdAt, long commentCount) {}
+    public record DashboardComment(Long id, Long taskId, String taskTitle, String authorName,
+                                   String body, Instant createdAt) {}
+    public record DashboardComments(List<DashboardComment> comments, Long nextBeforeId) {}
+
+    @GetMapping("/recent-comments")
+    @Transactional(readOnly = true)
+    public DashboardComments recentComments(@RequestParam(required = false) Long beforeId,
+                                            @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        var entries = taskCommentRepository.findRecentComments(account.isManager(), account.member(),
+                beforeId, PageRequest.of(0, COMMENT_PAGE_SIZE + 1));
+        var comments = entries.stream().limit(COMMENT_PAGE_SIZE)
+                .map(comment -> new DashboardComment(comment.id(), comment.task().getId(), comment.task().getTitle(),
+                        comment.author().profile().name(), comment.body(), comment.createdAt()))
+                .toList();
+        Long nextBeforeId = entries.size() > COMMENT_PAGE_SIZE ? comments.getLast().id() : null;
+        return new DashboardComments(comments, nextBeforeId);
+    }
 
     @GetMapping("/status-history")
     @Transactional(readOnly = true)
@@ -156,6 +180,20 @@ public class WorkItemController {
         WorkItem task = taskForUpdate(id);
         account.requireTaskAccess(task);
         task.setAssignee(request.assignee());
+        return toResponse(task);
+    }
+
+    @PatchMapping("/{id}/contributor")
+    @Transactional
+    public WorkItemResponse changeContributor(@PathVariable Long id, @RequestBody ContributorRequest request,
+                                              @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        account.requireManager();
+        WorkItem task = taskForUpdate(id);
+        TeamMember contributor = request.contributor();
+        if (contributor == TeamMember.MANAGER || (contributor != null && contributor == task.getAssignee())) {
+            throw badRequest("Choose a team member other than the assignee.");
+        }
+        task.setContributor(contributor);
         return toResponse(task);
     }
 
@@ -415,10 +453,7 @@ public class WorkItemController {
         List<WorkItem> items;
 
         if (!account.isManager()) {
-            items = requirementId == null
-                    ? workItemRepository.findByTypeAndAssigneeOrderByIdAsc(WorkItem.Type.TASK, account.member())
-                    : workItemRepository.findByRequirement_IdAndTypeAndAssigneeOrderByIdAsc(
-                            requirementId, WorkItem.Type.TASK, account.member());
+            items = workItemRepository.findMemberTasks(requirementId, WorkItem.Type.TASK, account.member());
         } else if (requirementId == null) {
             items = workItemRepository.findAll();
         } else {
@@ -468,12 +503,19 @@ public class WorkItemController {
                         ? null
                         : item.getParent().getId(),
                 item.getAssignee(),
+                memberName(item.getAssignee()),
+                item.getContributor(),
+                memberName(item.getContributor()),
                 item.getCreatedAt(),
                 item.getDueDate(),
                 item.getEstimatedHours(),
                 item.getStoryPoints(),
                 commentCount
         );
+    }
+
+    private String memberName(TeamMember member) {
+        return member == null ? null : member.profile().name();
     }
 
     private ResponseStatusException badRequest(String message) {

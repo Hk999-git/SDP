@@ -17,7 +17,7 @@ record WorkspaceAccount(String username, String name, TeamMember member) {
     }
 
     void requireTaskAccess(WorkItem task) {
-        if (!isManager() && task.getAssignee() != member) {
+        if (!isManager() && task.getAssignee() != member && task.getContributor() != member) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found.");
         }
     }

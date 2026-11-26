@@ -15,10 +15,13 @@ public interface WorkItemRepository
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<WorkItem> findForUpdateById(Long id);
 
-    List<WorkItem> findByTypeAndAssigneeOrderByIdAsc(WorkItem.Type type, TeamMember assignee);
-
-    List<WorkItem> findByRequirement_IdAndTypeAndAssigneeOrderByIdAsc(
-            Long requirementId, WorkItem.Type type, TeamMember assignee);
+    @Query("""
+            select item from WorkItem item
+            where item.type = :type and (:requirementId is null or item.requirement.id = :requirementId)
+              and (item.assignee = :member or item.contributor = :member)
+            order by item.id
+            """)
+    List<WorkItem> findMemberTasks(Long requirementId, WorkItem.Type type, TeamMember member);
 
     List<WorkItem> findByRequirement_IdAndTypeOrderByIdAsc(Long requirementId, WorkItem.Type type);
 

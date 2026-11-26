@@ -3,7 +3,7 @@ import { taskStatuses } from "./taskStatuses";
 
 const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
-export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, onUpdated, onAssigneeUpdated,
+export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, onUpdated, onAssignmentUpdated,
   onCommentCount, account }) {
   const [description, setDescription] = useState(task.description ?? "");
   const [dueDate, setDueDate] = useState(task.dueDate ?? "");
@@ -86,16 +86,16 @@ export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, o
     }
   }
 
-  async function changeAssignee(assignee) {
+  async function changeAssignment(field, value) {
     setAssigning(true);
     setAssignmentError("");
     try {
-      const updated = await requestJson(taskUrl + "/assignee", {
+      const updated = await requestJson(taskUrl + "/" + field, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ assignee }),
+        body: JSON.stringify({ [field]: value }),
       });
-      onAssigneeUpdated(updated);
+      onAssignmentUpdated(updated);
     } catch (error) {
       setAssignmentError(error.message);
     } finally {
@@ -117,13 +117,27 @@ export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, o
             <dt><label htmlFor="taskAssignee">Assignee</label></dt>
             <dd>
               <select id="taskAssignee" value={task.assignee ?? ""} disabled={assigning}
-                onChange={(event) => changeAssignee(event.target.value)}>
+                onChange={(event) => changeAssignment("assignee", event.target.value)}>
                 <option value="" disabled>Unassigned</option>
                 {teamMembers.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
               </select>
             </dd>
           </div>
-          ) : <div><dt>Assignee</dt><dd>{account.name}</dd></div>}
+          ) : <div><dt>Assignee</dt><dd>{task.assigneeName ?? "Unassigned"}</dd></div>}
+          {account.role === "MANAGER" ? (
+            <div>
+              <dt><label htmlFor="taskContributor">Contributed by</label></dt>
+              <dd>
+                <select id="taskContributor" value={task.contributor ?? ""} disabled={assigning}
+                  onChange={(event) => changeAssignment("contributor", event.target.value || null)}>
+                  <option value="">No contributor</option>
+                  {teamMembers.filter((member) => member.id !== task.assignee).map((member) => (
+                    <option key={member.id} value={member.id}>{member.name}</option>
+                  ))}
+                </select>
+              </dd>
+            </div>
+          ) : <div><dt>Contributed by</dt><dd>{task.contributorName ?? "—"}</dd></div>}
           <div><dt>Created</dt><dd>{task.createdAt ? dateTime.format(new Date(task.createdAt)) : "Date unavailable"}</dd></div>
         </dl>
         {assignmentError && <p role="alert">{assignmentError}</p>}

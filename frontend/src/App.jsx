@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
 // ADDED: Import the status board for the selected requirement.
@@ -191,7 +191,26 @@ function Workspace({ account, onLogout, logoutError }) {
   const isManager = account.role === "MANAGER";
   const [view, setView] = useState(() => selectedView(isManager));
   const [menuOpen, setMenuOpen] = useState(true);
+  const sidebarScroll = useRef(null);
+  const [canScrollSidebar, setCanScrollSidebar] = useState(false);
   const [taskProject, setTaskProject] = useState("");
+
+  useEffect(() => {
+    const region = sidebarScroll.current;
+    if (!menuOpen || !region) return;
+
+    const updateScrollButton = () => {
+      setCanScrollSidebar(region.scrollHeight - region.scrollTop - region.clientHeight > 1);
+    };
+    const observer = new ResizeObserver(updateScrollButton);
+    observer.observe(region);
+    observer.observe(region.firstElementChild);
+    region.addEventListener("scroll", updateScrollButton, { passive: true });
+    return () => {
+      observer.disconnect();
+      region.removeEventListener("scroll", updateScrollButton);
+    };
+  }, [menuOpen]);
 
   useEffect(() => {
     const updateView = () => {
@@ -486,6 +505,12 @@ function Workspace({ account, onLogout, logoutError }) {
   }
 
   // TASK STATUS: Move the card only after the backend confirms the update.
+  function updateAssignment({ id, assignee, assigneeName, contributor, contributorName }) {
+    setWorkItems((items) => items.map((item) => item.id === id
+      ? { ...item, assignee, assigneeName, contributor, contributorName }
+      : item));
+  }
+
   async function handleUpdateTask(id, field, value, extra = {}) {
     if (busy) return false;
     setTaskUpdateError("");
@@ -496,9 +521,13 @@ function Workspace({ account, onLogout, logoutError }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [field]: value, ...extra }),
       });
-      setWorkItems((previous) => previous.map((item) =>
-        item.id === id ? { ...item, [field]: updated[field] } : item
-      ));
+      if (field === "assignee") {
+        updateAssignment(updated);
+      } else {
+        setWorkItems((previous) => previous.map((item) =>
+          item.id === id ? { ...item, [field]: updated[field] } : item
+        ));
+      }
       return true;
     } catch (error) {
       setTaskUpdateError(`Could not update ${field} for task #${id}. ${errorMessage(error)}`);
@@ -594,7 +623,7 @@ function Workspace({ account, onLogout, logoutError }) {
   return (
     <div className="workspace-layout">
       <aside className="workspace-sidebar">
-        <a className="workspace-brand" href="#dashboard">AI Project Manager</a>
+        <a className="workspace-brand" href="#dashboard">Planova</a>
         <div className="workspace-identity">
           <strong>{account.name}</strong>
           <span>{isManager ? "Manager" : "Team member"}</span>
@@ -603,28 +632,38 @@ function Workspace({ account, onLogout, logoutError }) {
         </div>
         <button type="button" className="workspace-menu-toggle" aria-expanded={menuOpen}
           aria-controls="workspace-menu" onClick={() => setMenuOpen((open) => !open)}>Menu</button>
-        {menuOpen && <nav id="workspace-menu" aria-label="Workspace">
-          <a href="#dashboard" aria-current={view === "dashboard" ? "page" : undefined}>Dashboard</a>
-          <details className="workspace-projects">
-            <summary>Projects</summary>
-            {requirements.map((item) => (
-              <a key={item.id} href={isManager ? "#board" : "#my-tasks"}
-                onClick={() => {
-                  selectRequirement(String(item.id));
-                  setTaskProject(String(item.id));
-                }}>
-                {item.projectName}
-              </a>
-            ))}
-            {!requirements.length && <p>No saved projects.</p>}
-          </details>
-          <a href="#my-tasks" onClick={() => setTaskProject("")}
-            aria-current={view === "my-tasks" ? "page" : undefined}>{isManager ? "Tasks" : "My Tasks"}</a>
-          <a href="#new-task" className="workspace-subnav" aria-current={view === "new-task" ? "page" : undefined}>Create new task</a>
-          {isManager && Object.entries(managerViews).map(([key, label]) => (
-            <a key={key} href={`#${key}`} aria-current={view === key ? "page" : undefined}>{label}</a>
-          ))}
-        </nav>}
+        {menuOpen && (
+          <div className="workspace-menu-scroll" ref={sidebarScroll}>
+            <nav id="workspace-menu" aria-label="Workspace">
+              <a href="#dashboard" aria-current={view === "dashboard" ? "page" : undefined}>Dashboard</a>
+              <details className="workspace-projects">
+                <summary>Projects</summary>
+                {requirements.map((item) => (
+                  <a key={item.id} href={isManager ? "#board" : "#my-tasks"}
+                    onClick={() => {
+                      selectRequirement(String(item.id));
+                      setTaskProject(String(item.id));
+                    }}>
+                    {item.projectName}
+                  </a>
+                ))}
+                {!requirements.length && <p>No saved projects.</p>}
+              </details>
+              <a href="#my-tasks" onClick={() => setTaskProject("")}
+                aria-current={view === "my-tasks" ? "page" : undefined}>{isManager ? "Tasks" : "My Tasks"}</a>
+              <a href="#new-task" className="workspace-subnav" aria-current={view === "new-task" ? "page" : undefined}>Create new task</a>
+              {isManager && Object.entries(managerViews).map(([key, label]) => (
+                <a key={key} href={`#${key}`} aria-current={view === key ? "page" : undefined}>{label}</a>
+              ))}
+            </nav>
+          </div>
+        )}
+        {menuOpen && canScrollSidebar && (
+          <button type="button" className="workspace-scroll-down" aria-label="Scroll sidebar down"
+            onClick={() => sidebarScroll.current?.scrollBy({ top: 180 })}>
+            <span aria-hidden="true">⌄</span>
+          </button>
+        )}
       </aside>
 
       <main className="workspace-main">
@@ -681,9 +720,7 @@ function Workspace({ account, onLogout, logoutError }) {
               onUpdated={({ id, description, dueDate, estimatedHours }) => setWorkItems((items) =>
                 items.map((item) => item.id === id ? { ...item, description, dueDate, estimatedHours } : item)
               )}
-              onAssigneeUpdated={({ id, assignee }) => setWorkItems((items) =>
-                items.map((item) => item.id === id ? { ...item, assignee } : item)
-              )}
+              onAssignmentUpdated={updateAssignment}
             />
           ) : <p className="panel">Task not found.</p>
         )}
@@ -693,6 +730,8 @@ function Workspace({ account, onLogout, logoutError }) {
             tasks={workItems.filter((item) => item.type === "TASK")}
             requirements={requirements}
             isManager={isManager}
+            commentsUrl={WORK_ITEMS_URL + "/recent-comments"}
+            requestJson={requestJson}
           />
         )}
 
