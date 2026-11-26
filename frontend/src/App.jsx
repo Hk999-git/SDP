@@ -1,78 +1,42 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import "./App.css";
 
 // ADDED: Import the status board for the selected requirement.
 import WorkItemBoard from "./WorkItemBoard";
+import TeamWorkload from "./TeamWorkload";
+import TaskDetails from "./TaskDetails";
+import ProgressReports from "./ProgressReports";
+import { NewTask, SignIn, TaskDashboard, TaskTable } from "./WorkspaceHome";
 
-const REQUIREMENTS_URL = "http://localhost:8080/api/requirements";
-const WORK_ITEMS_URL = "http://localhost:8080/api/work-items";
-
-// DRAFT PREVIEW: Use a previous successful response for local testing during Gemini outages.
-const sampleAnalysis = {
-  epics: [
-    {
-      title: "Task Assignment Workflow",
-      stories: [
-        {
-          title: "Assign task to team member",
-          description:
-            "As a Project manager, I want to assign tasks to team members, so that work is delegated appropriately.",
-          acceptanceCriteria: [
-            "The system lists all available team members for selection.",
-            "The system updates the task status to assigned.",
-            "The system notifies the assigned team member of the new task.",
-          ],
-          tasks: [
-            { title: "Implement task assignment API endpoint" },
-            { title: "Develop UI component for member selection" },
-            { title: "Write unit tests for assignment logic" },
-            { title: "Write integration tests for notification service" },
-          ],
-        },
-      ],
-    },
-  ],
-  clarificationQuestions: [
-    "Is there a limit to the number of members that can be assigned to a single task?",
-    "Does a task need to be in a specific status to be assigned?",
-    "Should the system validate availability or workload when assigning tasks?",
-  ],
-};
-
-const fieldStyle = {
-  width: "100%",
-  padding: "12px",
-  border: "1px solid #cbd5e1",
-  borderRadius: "8px",
-  font: "inherit",
-};
-
-const cardStyle = {
-  border: "1px solid #cbd5e1",
-  borderRadius: "8px",
-  padding: "16px",
-  marginBottom: "12px",
-};
+const API_URL = "http://localhost:8080/api";
+const REQUIREMENTS_URL = API_URL + "/requirements";
+const WORK_ITEMS_URL = API_URL + "/work-items";
+const AUTH_URL = API_URL + "/auth";
 
 // ADDED: Shared request handling.
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const headers = new Headers(options.headers);
+  if (options.method && options.method !== "GET") headers.set("X-Workspace-Request", "1");
+  const response = await fetch(url, { ...options, credentials: "include", headers });
+  if (response.status === 401 && !url.startsWith(AUTH_URL + "/")) {
+    window.dispatchEvent(new Event("workspace-session-expired"));
+  }
 
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const message = body?.detail || body?.message;
 
-    throw new Error(
-      message || `Request failed (${response.status}).`
-    );
+    const error = new Error(message || `Request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
   }
 
-  return response.json();
+  return response.status === 204 ? null : response.json();
 }
 
 function errorMessage(error) {
   return error instanceof TypeError
-    ? "Cannot reach the backend. Check port 8080 and your React address in @CrossOrigin."
+    ? "Cannot reach the backend. Check that Spring Boot is running on port 8080."
     : error.message;
 }
 
@@ -88,29 +52,29 @@ function isValidDraft(analysis) {
         isText(story?.title) &&
         isText(story.description ?? "") &&
         isListOf(story.acceptanceCriteria ?? [], isText) &&
-        isListOf(story.tasks ?? [], (task) => isText(task?.title))
+        isListOf(story.tasks ?? [], (task) => isText(task?.title) && isText(task.description ?? ""))
       )
     ) && isListOf(analysis.clarificationQuestions ?? [], isText)
   );
 }
 
 // DRAFT PREVIEW: Show work packages and clarification questions for review.
-function DraftPreview({ analysis, isSample }) {
+function DraftPreview({ analysis, children }) {
   const questions = analysis.clarificationQuestions ?? [];
 
   return (
-    <section aria-labelledby="draft-heading">
-      <h2 id="draft-heading">{isSample ? "Sample draft" : "Generated draft"}</h2>
-      <p role="status">Draft received. Epics found: {analysis.epics.length}.</p>
+    <section className="panel draft-panel" aria-labelledby="draft-heading">
+      <h2 id="draft-heading">Generated draft</h2>
+      {analysis.epics.length === 0 && <p>No epics were generated.</p>}
 
       {analysis.epics.map((epic, epicIndex) => (
-        <article key={epicIndex} style={cardStyle}>
+        <article key={epicIndex} className="generated-epic">
           <h3>Epic: {epic.title}</h3>
           {epic.stories.map((story, storyIndex) => {
             const criteria = story.acceptanceCriteria ?? [];
             const tasks = story.tasks ?? [];
             return (
-              <section key={storyIndex}>
+              <section key={storyIndex} className="generated-story">
                 <h4>Story: {story.title}</h4>
                 {story.description && <p>{story.description}</p>}
                 {criteria.length > 0 && (
@@ -125,7 +89,12 @@ function DraftPreview({ analysis, isSample }) {
                   <>
                     <h5>Tasks</h5>
                     <ul>
-                      {tasks.map((task, index) => <li key={index}>{task.title}</li>)}
+                      {tasks.map((task, index) => (
+                        <li key={index}>
+                          {task.title}
+                          {task.assigneeName && <span> — {task.assigneeName}</span>}
+                        </li>
+                      ))}
                     </ul>
                   </>
                 )}
@@ -143,20 +112,106 @@ function DraftPreview({ analysis, isSample }) {
           </ul>
         </>
       )}
+      {children}
     </section>
   );
 }
 
+const sharedViews = { dashboard: "Dashboard", "my-tasks": "My Tasks", "new-task": "Create new task" };
+const managerViews = {
+  board: "Board",
+  "work-packages": "Work Packages",
+  requirements: "Requirements",
+  team: "Team",
+  reports: "Reports",
+};
+
+function selectedView(isManager) {
+  const hash = window.location.hash.slice(1);
+  const allowed = Object.hasOwn(sharedViews, hash) || (isManager && Object.hasOwn(managerViews, hash));
+  return allowed || /^task\/[1-9]\d*$/.test(hash) ? hash : "dashboard";
+}
+
 function App() {
+  const [account, setAccount] = useState(null);
+  const [checking, setChecking] = useState(true);
+  const [signingIn, setSigningIn] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [logoutError, setLogoutError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const expired = () => { setAccount(null); setLoginError("Your session ended. Sign in again."); };
+    window.addEventListener("workspace-session-expired", expired);
+    requestJson(AUTH_URL + "/session", { signal: controller.signal })
+      .then((profile) => { if (!controller.signal.aborted) setAccount(profile); })
+      .catch((error) => { if (!controller.signal.aborted && error.status !== 401) setLoginError(errorMessage(error)); })
+      .finally(() => { if (!controller.signal.aborted) setChecking(false); });
+    return () => {
+      controller.abort();
+      window.removeEventListener("workspace-session-expired", expired);
+    };
+  }, []);
+
+  async function login(username, password) {
+    setSigningIn(true);
+    setLoginError("");
+    setLogoutError("");
+    try {
+      const profile = await requestJson(AUTH_URL + "/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      window.location.hash = "dashboard";
+      setAccount(profile);
+    } catch (error) {
+      setLoginError(error.status === 401 ? "Invalid username or password." : errorMessage(error));
+    } finally {
+      setSigningIn(false);
+    }
+  }
+
+  async function logout() {
+    setLogoutError("");
+    try {
+      await requestJson(AUTH_URL + "/logout", { method: "POST" });
+      setAccount(null);
+    } catch (error) {
+      if (error.status === 401) setAccount(null);
+      else setLogoutError(errorMessage(error));
+    }
+  }
+
+  if (checking) return <main className="sign-in-page"><p role="status">Checking your session…</p></main>;
+  if (!account) return <SignIn onLogin={login} busy={signingIn} error={loginError} />;
+  return <Workspace account={account} onLogout={logout} logoutError={logoutError} />;
+}
+
+function Workspace({ account, onLogout, logoutError }) {
+  const isManager = account.role === "MANAGER";
+  const [view, setView] = useState(() => selectedView(isManager));
+  const [menuOpen, setMenuOpen] = useState(true);
+  const [taskProject, setTaskProject] = useState("");
+
+  useEffect(() => {
+    const updateView = () => {
+      setView(selectedView(isManager));
+      window.scrollTo(0, 0);
+    };
+    window.addEventListener("hashchange", updateView);
+    return () => window.removeEventListener("hashchange", updateView);
+  }, [isManager]);
+
   const [projectName, setProjectName] = useState("");
   const [requirement, setRequirement] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // DRAFT GENERATION: Store the AI response and track the request in progress.
   const [draft, setDraft] = useState(null);
   const [generating, setGenerating] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [draftSaveError, setDraftSaveError] = useState("");
 
   const [requirements, setRequirements] = useState([]);
   const [listLoading, setListLoading] = useState(true);
@@ -164,6 +219,18 @@ function App() {
 
   // ADDED: Work-package data and form state.
   const [workItems, setWorkItems] = useState([]);
+  const updateCommentCount = useCallback((id, commentCount) => {
+    setWorkItems((items) => items.map((item) => item.id === id && item.commentCount !== commentCount
+      ? { ...item, commentCount }
+      : item));
+  }, []);
+  const taskId = view.startsWith("task/") ? view.slice(5) : null;
+  const openTask = taskId
+    ? workItems.find((item) => item.type === "TASK" && String(item.id) === taskId)
+    : null;
+  const [teamMembers, setTeamMembers] = useState([]);
+  const [updatingTask, setUpdatingTask] = useState(false);
+  const [taskUpdateError, setTaskUpdateError] = useState("");
   const [selectedRequirementId, setSelectedRequirementId] =
     useState("");
   const [title, setTitle] = useState("");
@@ -185,7 +252,7 @@ function App() {
       setListError("");
 
       try {
-        const [savedRequirements, savedWorkItems] =
+        const [savedRequirements, savedWorkItems, roster] =
           await Promise.all([
             requestJson(REQUIREMENTS_URL, {
               signal: controller.signal,
@@ -193,6 +260,9 @@ function App() {
             requestJson(WORK_ITEMS_URL, {
               signal: controller.signal,
             }),
+            isManager ? requestJson(`${WORK_ITEMS_URL}/team-members`, {
+              signal: controller.signal,
+            }) : Promise.resolve([]),
           ]);
 
         if (controller.signal.aborted) return;
@@ -201,13 +271,17 @@ function App() {
           [...savedRequirements].sort((a, b) => b.id - a.id)
         );
         setWorkItems(savedWorkItems);
+        setTeamMembers(roster);
 
+        const taskRequirementIds = new Set(
+          savedWorkItems.filter((item) => item.type === "TASK").map((item) => item.requirementId)
+        );
         setSelectedRequirementId((current) =>
           savedRequirements.some(
             (item) => String(item.id) === current
           )
             ? current
-            : String(savedRequirements[0]?.id ?? "")
+            : String((savedRequirements.find((entry) => taskRequirementIds.has(entry.id)) ?? savedRequirements[0])?.id ?? "")
         );
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -223,7 +297,7 @@ function App() {
     loadData();
 
     return () => controller.abort();
-  }, [reload]);
+  }, [reload, isManager]);
 
   async function handleFileUpload(event) {
     const file = event.target.files?.[0];
@@ -240,7 +314,6 @@ function App() {
 
     try {
       const fileText = await file.text();
-      // DRAFT GENERATION: Clear the draft when the upload replaces the requirement.
       setDraft(null);
       setRequirement(fileText);
     } catch {
@@ -256,6 +329,7 @@ function App() {
     };
 
     setError("");
+    setDraftSaveError("");
     setDraft(null);
     setGenerating(true);
 
@@ -271,7 +345,7 @@ function App() {
         throw new Error("The backend returned an unexpected draft format.");
       }
 
-      setDraft({ inputs, analysis });
+      setDraft({ inputs, analysis, saveId: crypto.randomUUID() });
     } catch (error) {
       setError(
         error instanceof SyntaxError
@@ -281,19 +355,6 @@ function App() {
     } finally {
       setGenerating(false);
     }
-  }
-
-  // DRAFT PREVIEW: Load the sample without contacting the analysis endpoint.
-  function handleLoadSampleDraft() {
-    setError("");
-    setDraft({
-      inputs: {
-        projectName: projectName.trim(),
-        requirement: requirement.trim(),
-      },
-      analysis: sampleAnalysis,
-      isSample: true,
-    });
   }
 
   async function handleSubmit(event) {
@@ -364,8 +425,7 @@ function App() {
     (item) => item.type === "EPIC"
   );
 
-  // DRAFT GENERATION: Disable form actions while analysis is running.
-  const busy = listLoading || loading || workSaving || generating;
+  const busy = listLoading || loading || workSaving || updatingTask || generating || savingDraft;
 
   // DRAFT GENERATION: Only show a response for the current form values.
   const currentDraft =
@@ -373,6 +433,80 @@ function App() {
     draft.inputs.requirement === requirement.trim()
       ? draft
       : null;
+
+  // SAVE DRAFT: Save the reviewed result and put its work items on the board.
+  async function handleSaveDraft() {
+    if (busy || !currentDraft?.saveId || currentDraft.saved) return;
+
+    setDraftSaveError("");
+    setSavingDraft(true);
+    try {
+      const { inputs, analysis, saveId } = currentDraft;
+      const { requirement: savedRequirement, workItems: savedItems } =
+        await requestJson(`${WORK_ITEMS_URL}/draft`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...inputs,
+            saveId,
+            requirementId: result?.id ?? null,
+            epics: analysis.epics.map((epic) => ({
+              ...epic,
+              stories: epic.stories.map((story) => ({
+                ...story,
+                tasks: story.tasks?.map(({ title, requiredRole, requiredSkill, description }) => ({
+                  title,
+                  requiredRole,
+                  requiredSkill,
+                  description,
+                })),
+              })),
+            })),
+            clarificationQuestions: analysis.clarificationQuestions,
+          }),
+        });
+
+      setRequirements((previous) =>
+        [savedRequirement, ...previous.filter((item) => item.id !== savedRequirement.id)]
+          .sort((a, b) => b.id - a.id)
+      );
+      const savedIds = new Set(savedItems.map((item) => item.id));
+      setWorkItems((previous) => [
+        ...previous.filter((item) => !savedIds.has(item.id)),
+        ...savedItems,
+      ]);
+      setResult(savedRequirement);
+      selectRequirement(String(savedRequirement.id));
+      setDraft((previous) => previous?.saveId === saveId ? { ...previous, saved: true } : previous);
+    } catch (error) {
+      setDraftSaveError(errorMessage(error));
+    } finally {
+      setSavingDraft(false);
+    }
+  }
+
+  // TASK STATUS: Move the card only after the backend confirms the update.
+  async function handleUpdateTask(id, field, value, extra = {}) {
+    if (busy) return false;
+    setTaskUpdateError("");
+    setUpdatingTask(true);
+    try {
+      const updated = await requestJson(`${WORK_ITEMS_URL}/${id}/${field}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: value, ...extra }),
+      });
+      setWorkItems((previous) => previous.map((item) =>
+        item.id === id ? { ...item, [field]: updated[field] } : item
+      ));
+      return true;
+    } catch (error) {
+      setTaskUpdateError(`Could not update ${field} for task #${id}. ${errorMessage(error)}`);
+      return false;
+    } finally {
+      setUpdatingTask(false);
+    }
+  }
 
   // ADDED: Save a work package through the new Java API.
   async function handleCreateWorkItem(event) {
@@ -422,379 +556,464 @@ function App() {
     }
   }
 
+  function selectRequirement(id) {
+    setSelectedRequirementId(id);
+    setParentId("");
+    setWorkError("");
+    setWorkSuccess("");
+    setTaskUpdateError("");
+  }
+
   // ADDED: Read-only backlog card.
   function renderWorkItem(item) {
     return (
       <div>
         <strong>
-          {item.type} #{item.id}: {item.title}
+          {item.type} #{item.id}: {item.type === "TASK"
+            ? <a href={"#task/" + item.id}>{item.title}</a>
+            : item.title}
         </strong>
 
         <p>
           Status: {item.status.replaceAll("_", " ")}
           {" · "}
           Priority: {item.priority}
+          {item.type === "STORY" && item.storyPoints != null && ` · ${item.storyPoints} story points`}
         </p>
 
         {item.description && (
-          <p style={{ whiteSpace: "pre-wrap" }}>
-            {item.description}
-          </p>
+          <details>
+            <summary>Details</summary>
+            <p className="preserve-text">{item.description}</p>
+          </details>
         )}
       </div>
     );
   }
 
   return (
-    <main
-      className="container"
-      style={{ width: "min(1100px, 94%)" }}
-    >
-      <h1>AI Project Manager</h1>
-      <p>Capture requirements and organize epics, stories, and tasks.</p>
-
-      <section>
-        <h2>Capture Requirement</h2>
-
-        <form onSubmit={handleSubmit}>
-          <label htmlFor="projectName">Project name</label>
-          <input
-            id="projectName"
-            type="text"
-            placeholder="Enter project name"
-            value={projectName}
-            disabled={busy}
-            required
-            onChange={(event) => {
-              setProjectName(event.target.value);
-              setResult(null);
-              setDraft(null); // DRAFT GENERATION: Discard the previous draft when this input changes.
-            }}
-          />
-
-          <label htmlFor="requirementFile">
-            Upload a requirement file
-          </label>
-          <input
-            id="requirementFile"
-            type="file"
-            accept=".txt,text/plain"
-            disabled={busy}
-            onChange={handleFileUpload}
-          />
-
-          <label htmlFor="requirement">Business requirement</label>
-          <textarea
-            id="requirement"
-            rows={6}
-            placeholder="Type your requirement or upload a .txt file..."
-            value={requirement}
-            disabled={busy}
-            required
-            onChange={(event) => {
-              setRequirement(event.target.value);
-              setResult(null);
-              setDraft(null); // DRAFT GENERATION: Discard the previous draft when this input changes.
-            }}
-          />
-
-          <p>{requirement.length} characters</p>
-
-          {error && <p role="alert">{error}</p>}
-
-          <button
-            type="submit"
-            disabled={
-              busy ||
-              !projectName.trim() ||
-              !requirement.trim()
-            }
-          >
-            {loading ? "Saving..." : "Save requirement"}
-          </button>
-
-          {/* DRAFT GENERATION: Request analysis without submitting the save form. */}
-          <button
-            type="button"
-            onClick={handleGenerateDraft}
-            disabled={busy || !projectName.trim() || !requirement.trim()}
-          >
-            {generating ? "Generating..." : "Generate draft"}
-          </button>
-
-          {/* DRAFT PREVIEW: Offer the sample only while running the dev server. */}
-          {import.meta.env.DEV && (
-            <button type="button" onClick={handleLoadSampleDraft} disabled={busy}>
-              Load sample draft
-            </button>
-          )}
-        </form>
-
-        {/* DRAFT PREVIEW: Render the full sample or generated response. */}
-        {currentDraft && (
-          <DraftPreview
-            analysis={currentDraft.analysis}
-            isSample={currentDraft.isSample}
-          />
-        )}
-
-        {result && (
-          <p role="status">
-            Requirement #{result.id} saved successfully for{" "}
-            <strong>{result.projectName}</strong>.
-          </p>
-        )}
-      </section>
-
-      {listLoading && <p>Loading saved data...</p>}
-
-      {listError && (
-        <div role="alert">
-          <p>{listError}</p>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => setReload((value) => value + 1)}
-          >
-            Retry loading
-          </button>
+    <div className="workspace-layout">
+      <aside className="workspace-sidebar">
+        <a className="workspace-brand" href="#dashboard">AI Project Manager</a>
+        <div className="workspace-identity">
+          <strong>{account.name}</strong>
+          <span>{isManager ? "Manager" : "Team member"}</span>
+          <button type="button" onClick={onLogout}>Sign out</button>
+          {logoutError && <p role="alert">{logoutError}</p>}
         </div>
-      )}
-
-      {/* ADDED: Requirement selection for the backlog and form. */}
-      <section>
-        <h2>Work Packages</h2>
-
-        <label htmlFor="selectedRequirement">
-          Select business requirement
-        </label>
-        <select
-          id="selectedRequirement"
-          style={fieldStyle}
-          value={selectedRequirementId}
-          disabled={busy || Boolean(listError)}
-          onChange={(event) => {
-            setSelectedRequirementId(event.target.value);
-            setParentId("");
-            setWorkError("");
-            setWorkSuccess("");
-          }}
-        >
-          <option value="">Select a requirement</option>
-          {requirements.map((item) => (
-            <option key={item.id} value={String(item.id)}>
-              #{item.id} — {item.projectName}
-            </option>
+        <button type="button" className="workspace-menu-toggle" aria-expanded={menuOpen}
+          aria-controls="workspace-menu" onClick={() => setMenuOpen((open) => !open)}>Menu</button>
+        {menuOpen && <nav id="workspace-menu" aria-label="Workspace">
+          <a href="#dashboard" aria-current={view === "dashboard" ? "page" : undefined}>Dashboard</a>
+          <details className="workspace-projects">
+            <summary>Projects</summary>
+            {requirements.map((item) => (
+              <a key={item.id} href={isManager ? "#board" : "#my-tasks"}
+                onClick={() => {
+                  selectRequirement(String(item.id));
+                  setTaskProject(String(item.id));
+                }}>
+                {item.projectName}
+              </a>
+            ))}
+            {!requirements.length && <p>No saved projects.</p>}
+          </details>
+          <a href="#my-tasks" onClick={() => setTaskProject("")}
+            aria-current={view === "my-tasks" ? "page" : undefined}>{isManager ? "Tasks" : "My Tasks"}</a>
+          <a href="#new-task" className="workspace-subnav" aria-current={view === "new-task" ? "page" : undefined}>Create new task</a>
+          {isManager && Object.entries(managerViews).map(([key, label]) => (
+            <a key={key} href={`#${key}`} aria-current={view === key ? "page" : undefined}>{label}</a>
           ))}
-        </select>
+        </nav>}
+      </aside>
 
-        {selectedRequirement && (
-          <p style={{ whiteSpace: "pre-wrap" }}>
-            {selectedRequirement.description}
-          </p>
-        )}
-
-        <h3>Create Work Package</h3>
-
-        <form onSubmit={handleCreateWorkItem}>
-          <label htmlFor="workType">Type</label>
-          <select
-            id="workType"
-            style={fieldStyle}
-            value={type}
-            disabled={busy}
-            onChange={(event) => {
-              setType(event.target.value);
-              setParentId("");
-              setWorkError("");
-              setWorkSuccess("");
-            }}
-          >
-            <option value="EPIC">Epic</option>
-            <option value="STORY">Story</option>
-            <option value="TASK">Task</option>
-          </select>
-
-          {type !== "EPIC" && (
-            <>
-              <label htmlFor="parentId">
-                {type === "STORY" ? "Parent epic" : "Parent story"}
-              </label>
+      <main className="workspace-main">
+        <header className="page-header">
+          {taskId ? (
+            <div className="task-page-heading">
+              <a href={isManager ? "#board" : "#my-tasks"} onClick={() => openTask && selectRequirement(String(openTask.requirementId))}>
+                {isManager ? "Back to board" : "Back to My Tasks"}
+              </a>
+              <p>Task #{taskId}</p>
+              <h1>{openTask?.title ?? "Task"}</h1>
+            </div>
+          ) : <h1>{isManager && view === "my-tasks" ? "Tasks" : sharedViews[view] ?? managerViews[view]}</h1>}
+          {(view === "board" || view === "work-packages") && (
+            <div className="requirement-picker">
+              <label htmlFor="selectedRequirement">Requirement</label>
               <select
-                id="parentId"
-                style={fieldStyle}
-                value={parentId}
-                disabled={busy}
-                required
-                onChange={(event) => setParentId(event.target.value)}
+                id="selectedRequirement"
+                value={selectedRequirementId}
+                disabled={busy || Boolean(listError)}
+                onChange={(event) => selectRequirement(event.target.value)}
               >
-                <option value="">Select a parent</option>
-                {availableParents.map((item) => (
+                <option value="">Select a requirement</option>
+                {requirements.map((item) => (
                   <option key={item.id} value={String(item.id)}>
-                    #{item.id} — {item.title}
+                    #{item.id} — {item.projectName}
                   </option>
                 ))}
               </select>
-
-              {availableParents.length === 0 && (
-                <p>
-                  Create an{" "}
-                  {type === "STORY" ? "epic" : "associated story"}{" "}
-                  for this requirement first.
-                </p>
-              )}
-            </>
+            </div>
           )}
+        </header>
 
-          <label htmlFor="workTitle">Title</label>
-          <input
-            id="workTitle"
-            value={title}
-            maxLength={255}
-            placeholder="Enter work-package title"
-            disabled={busy}
-            required
-            onChange={(event) => setTitle(event.target.value)}
+        {listLoading && <p role="status">Loading saved data…</p>}
+        {listError && (
+          <div className="panel" role="alert">
+            <p>{listError}</p>
+            <button type="button" disabled={busy} onClick={() => setReload((value) => value + 1)}>
+              Retry loading
+            </button>
+          </div>
+        )}
+
+        {taskId && !listLoading && !listError && (
+          openTask ? (
+            <TaskDetails
+              key={openTask.id}
+              task={openTask}
+              account={account}
+              teamMembers={teamMembers}
+              taskUrl={WORK_ITEMS_URL + "/" + openTask.id}
+              requestJson={requestJson}
+              onCommentCount={updateCommentCount}
+              onUpdated={({ id, description, dueDate, estimatedHours }) => setWorkItems((items) =>
+                items.map((item) => item.id === id ? { ...item, description, dueDate, estimatedHours } : item)
+              )}
+              onAssigneeUpdated={({ id, assignee }) => setWorkItems((items) =>
+                items.map((item) => item.id === id ? { ...item, assignee } : item)
+              )}
+            />
+          ) : <p className="panel">Task not found.</p>
+        )}
+
+        {view === "dashboard" && !listLoading && !listError && (
+          <TaskDashboard
+            tasks={workItems.filter((item) => item.type === "TASK")}
+            requirements={requirements}
+            isManager={isManager}
           />
+        )}
 
-          <label htmlFor="workDescription">Description</label>
-          <textarea
-            id="workDescription"
-            rows={4}
-            value={description}
-            placeholder="Describe the work..."
-            disabled={busy}
-            onChange={(event) => setDescription(event.target.value)}
-          />
+        {view === "my-tasks" && !listLoading && !listError && (
+          <section className="panel" aria-label={isManager ? "Project tasks" : "My tasks"}>
+            <div className="task-list-header">
+              <label htmlFor="taskProject">Project</label>
+              <select id="taskProject" value={taskProject} onChange={(event) => setTaskProject(event.target.value)}>
+                <option value="">All projects</option>
+                {requirements.map((item) => <option key={item.id} value={item.id}>{item.projectName}</option>)}
+              </select>
+              <a href="#new-task">Create new task</a>
+            </div>
+            {taskUpdateError && <p role="alert">{taskUpdateError}</p>}
+            <TaskTable
+              tasks={workItems.filter((item) => item.type === "TASK" && (!taskProject || String(item.requirementId) === taskProject))}
+              projects={new Map(requirements.map((item) => [item.id, item.projectName]))}
+              onUpdateStatus={isManager ? undefined : handleUpdateTask}
+              updatesDisabled={busy}
+            />
+          </section>
+        )}
 
-          <label htmlFor="priority">Priority</label>
-          <select
-            id="priority"
-            style={fieldStyle}
-            value={priority}
-            disabled={busy}
-            onChange={(event) => setPriority(event.target.value)}
-          >
-            <option value="LOW">Low</option>
-            <option value="MEDIUM">Medium</option>
-            <option value="HIGH">High</option>
-          </select>
+        {view === "new-task" && !listLoading && !listError && (
+          <NewTask requirements={requirements} workItemsUrl={WORK_ITEMS_URL} requestJson={requestJson}
+            onCreated={(task) => {
+              setWorkItems((items) => [...items, task]);
+              window.location.hash = "task/" + task.id;
+            }} />
+        )}
 
-          <p>New work packages start with status To Do.</p>
+        {view === "board" && !listLoading && !listError && (
+          selectedRequirement ? (
+            <WorkItemBoard
+              workItems={selectedItems}
+              teamMembers={teamMembers}
+              taskUpdatesDisabled={busy}
+              taskUpdateError={taskUpdateError}
+              onTaskUpdate={handleUpdateTask}
+            />
+          ) : <p className="panel">Select a saved requirement to view its tasks.</p>
+        )}
 
-          {workError && <p role="alert">{workError}</p>}
-          {workSuccess && <p role="status">{workSuccess}</p>}
+        {view === "work-packages" && !listLoading && !listError && (
+          selectedRequirement ? (
+            <div className="split-layout">
+              <section className="panel" aria-label="Backlog">
+                <h2>Backlog <span className="section-count">{selectedItems.length}</span></h2>
+              {epics.length === 0 && <p>No epics yet.</p>}
 
-          <button
-            type="submit"
-            disabled={
-              busy ||
-              Boolean(listError) ||
-              !selectedRequirementId ||
-              !title.trim() ||
-              (type !== "EPIC" && !parentId)
-            }
-          >
-            {workSaving ? "Creating..." : `Create ${type.toLowerCase()}`}
-          </button>
-        </form>
-      </section>
-
-      {/* ADDED: Epic → Story → Task hierarchy. */}
-      <section>
-        <h2>Backlog ({selectedItems.length} work packages)</h2>
-
-        {!selectedRequirementId && <p>Select a requirement above.</p>}
-
-        {selectedRequirementId &&
-          !listLoading &&
-          !listError &&
-          epics.length === 0 && <p>Create your first epic above.</p>}
-
-        {epics.map((epic) => {
-          const stories = selectedItems.filter(
-            (item) =>
-              item.type === "STORY" && item.parentId === epic.id
-          );
-
-          return (
-            <article
-              key={epic.id}
-              style={{
-                ...cardStyle,
-                borderLeft: "4px solid #7c3aed",
-                marginTop: "16px",
-              }}
-            >
-              {renderWorkItem(epic)}
-
-              {stories.length === 0 && <p>No stories yet.</p>}
-
-              {stories.map((story) => {
-                const tasks = selectedItems.filter(
+              {epics.map((epic) => {
+                const stories = selectedItems.filter(
                   (item) =>
-                    item.type === "TASK" &&
-                    item.parentId === story.id
+                    item.type === "STORY" && item.parentId === epic.id
                 );
 
                 return (
                   <article
-                    key={story.id}
-                    style={{
-                      ...cardStyle,
-                      borderLeft: "4px solid #2563eb",
-                    }}
+                    key={epic.id}
+                    className="backlog-card backlog-epic"
                   >
-                    {renderWorkItem(story)}
+                    {renderWorkItem(epic)}
 
-                    {tasks.length === 0 && <p>No tasks yet.</p>}
+                    {stories.length === 0 && <p>No stories yet.</p>}
 
-                    {tasks.map((task) => (
-                      <article
-                        key={task.id}
-                        style={{
-                          ...cardStyle,
-                          borderLeft: "4px solid #16a34a",
-                        }}
-                      >
-                        {renderWorkItem(task)}
-                      </article>
-                    ))}
+                    {stories.map((story) => {
+                      const tasks = selectedItems.filter(
+                        (item) =>
+                          item.type === "TASK" &&
+                          item.parentId === story.id
+                      );
+
+                      return (
+                        <article
+                          key={story.id}
+                          className="backlog-card backlog-story"
+                        >
+                          {renderWorkItem(story)}
+
+                          {tasks.length === 0 && <p>No tasks yet.</p>}
+
+                          {tasks.map((task) => (
+                            <article
+                              key={task.id}
+                              className="backlog-card backlog-task"
+                            >
+                              {renderWorkItem(task)}
+                            </article>
+                          ))}
+                        </article>
+                      );
+                    })}
                   </article>
                 );
               })}
-            </article>
-          );
-        })}
-      </section>
+              </section>
+              <section className="panel" aria-label="New work package">
+                <h2>New work package</h2>
+              <form onSubmit={handleCreateWorkItem}>
+                <label htmlFor="workType">Type</label>
+                <select
+                  id="workType"
+                  value={type}
+                  disabled={busy}
+                  onChange={(event) => {
+                    setType(event.target.value);
+                    setParentId("");
+                    setWorkError("");
+                    setWorkSuccess("");
+                  }}
+                >
+                  <option value="EPIC">Epic</option>
+                  <option value="STORY">Story</option>
+                  <option value="TASK">Task</option>
+                </select>
 
-      {/* ADDED: Show the selected requirement’s work packages on the status board. */}
-      {selectedRequirementId && !listLoading && !listError && (
-        <WorkItemBoard workItems={selectedItems} />
-      )}
+                {type !== "EPIC" && (
+                  <>
+                    <label htmlFor="parentId">
+                      {type === "STORY" ? "Parent epic" : "Parent story"}
+                    </label>
+                    <select
+                      id="parentId"
+                          value={parentId}
+                      disabled={busy}
+                      required
+                      onChange={(event) => setParentId(event.target.value)}
+                    >
+                      <option value="">Select a parent</option>
+                      {availableParents.map((item) => (
+                        <option key={item.id} value={String(item.id)}>
+                          #{item.id} — {item.title}
+                        </option>
+                      ))}
+                    </select>
 
-      <section>
-        <h2>Saved Requirements ({requirements.length})</h2>
+                    {availableParents.length === 0 && (
+                      <p>
+                        Create an{" "}
+                        {type === "STORY" ? "epic" : "associated story"}{" "}
+                        for this requirement first.
+                      </p>
+                    )}
+                  </>
+                )}
 
-        {!listLoading &&
-          !listError &&
-          requirements.length === 0 && (
-            <p>No requirements saved yet.</p>
-          )}
+                <label htmlFor="workTitle">Title</label>
+                <input
+                  id="workTitle"
+                  value={title}
+                  maxLength={255}
+                  placeholder="Enter work-package title"
+                  disabled={busy}
+                  required
+                  onChange={(event) => setTitle(event.target.value)}
+                />
 
-        {requirements.map((item) => (
-          <article key={item.id} style={cardStyle}>
-            <h3>
-              #{item.id} — {item.projectName}
-            </h3>
-            <p style={{ whiteSpace: "pre-wrap" }}>
-              {item.description}
-            </p>
-            <small>Created: {item.createdAt}</small>
-          </article>
-        ))}
-      </section>
-    </main>
+                <label htmlFor="workDescription">Description</label>
+                <textarea
+                  id="workDescription"
+                  rows={4}
+                  value={description}
+                  placeholder="Describe the work..."
+                  disabled={busy}
+                  onChange={(event) => setDescription(event.target.value)}
+                />
+
+                <label htmlFor="priority">Priority</label>
+                <select
+                  id="priority"
+                  value={priority}
+                  disabled={busy}
+                  onChange={(event) => setPriority(event.target.value)}
+                >
+                  <option value="LOW">Low</option>
+                  <option value="MEDIUM">Medium</option>
+                  <option value="HIGH">High</option>
+                </select>
+
+                {workError && <p role="alert">{workError}</p>}
+                {workSuccess && <p role="status">{workSuccess}</p>}
+
+                <button
+                  type="submit"
+                  disabled={
+                    busy ||
+                    Boolean(listError) ||
+                    !selectedRequirementId ||
+                    !title.trim() ||
+                    (type !== "EPIC" && !parentId)
+                  }
+                >
+                  {workSaving ? "Creating..." : `Create ${type.toLowerCase()}`}
+                </button>
+              </form>
+              </section>
+            </div>
+          ) : <p className="panel">Select a saved requirement to view its work packages.</p>
+        )}
+
+        {view === "requirements" && (
+          <div className="split-layout">
+            <section className="panel" aria-label="Saved requirements">
+              <h2>Saved requirements <span className="section-count">{requirements.length}</span></h2>
+              {!listLoading && !listError && requirements.length === 0 && <p>No requirements saved yet.</p>}
+              {requirements.map((item) => (
+                <details key={item.id} className="requirement-entry">
+                  <summary><span>#{item.id}</span> {item.projectName}</summary>
+                  <p className="preserve-text">{item.description}</p>
+                  {item.clarificationQuestions && (
+                    <>
+                      <h3>Clarification questions</h3>
+                      <p className="preserve-text">{item.clarificationQuestions}</p>
+                    </>
+                  )}
+                  <a href="#board" onClick={() => selectRequirement(String(item.id))}>Open board</a>
+                </details>
+              ))}
+            </section>
+            <section className="panel" aria-label="New requirement">
+              <h2>New requirement</h2>
+              <form onSubmit={handleSubmit}>
+                <label htmlFor="projectName">Project name</label>
+                <input
+                  id="projectName"
+                  type="text"
+                  placeholder="Enter project name"
+                  value={projectName}
+                  disabled={busy}
+                  required
+                  onChange={(event) => {
+                    setProjectName(event.target.value);
+                    setResult(null);
+                    setDraft(null);
+                  }}
+                />
+
+                <label htmlFor="requirementFile">
+                  Upload a requirement file
+                </label>
+                <input
+                  id="requirementFile"
+                  type="file"
+                  accept=".txt,text/plain"
+                  disabled={busy}
+                  onChange={handleFileUpload}
+                />
+
+                <label htmlFor="requirement">Business requirement</label>
+                <textarea
+                  id="requirement"
+                  rows={6}
+                  placeholder="Type your requirement or upload a .txt file..."
+                  value={requirement}
+                  disabled={busy}
+                  required
+                  onChange={(event) => {
+                    setRequirement(event.target.value);
+                    setResult(null);
+                    setDraft(null);
+                  }}
+                />
+
+
+                {error && <p role="alert">{error}</p>}
+
+                <div className="requirement-actions">
+                  <button
+                    type="button"
+                    onClick={handleGenerateDraft}
+                    disabled={busy || !projectName.trim() || !requirement.trim() || currentDraft?.saved}
+                  >
+                    {generating ? "Generating…" : "Generate draft"}
+                  </button>
+                  <button
+                    type="submit"
+                    className="secondary-button"
+                    disabled={busy || !projectName.trim() || !requirement.trim() || Boolean(result)}
+                  >
+                    {loading ? "Saving…" : "Save requirement"}
+                  </button>
+                </div>
+              </form>
+              {result && (
+                <p role="status">
+                  Requirement #{result.id} saved successfully for{" "}
+                  <strong>{result.projectName}</strong>.
+                </p>
+              )}
+            </section>
+            {currentDraft && (
+              <DraftPreview analysis={currentDraft.analysis}>
+                <div className="requirement-actions">
+                  <button
+                    type="button"
+                    onClick={handleSaveDraft}
+                    disabled={busy || currentDraft.saved || currentDraft.analysis.epics.length === 0}
+                  >
+                    {savingDraft ? "Saving draft…" : currentDraft.saved ? "Saved to board" : "Save draft to board"}
+                  </button>
+                  {currentDraft.saved && <a href="#board">Open board</a>}
+                </div>
+                {draftSaveError && <p role="alert">{draftSaveError}</p>}
+              </DraftPreview>
+            )}
+          </div>
+        )}
+
+        {view === "team" && !listLoading && !listError && (
+          <TeamWorkload
+            members={teamMembers}
+            requirements={requirements}
+            workItems={workItems}
+          />
+        )}
+        {view === "reports" && !listLoading && !listError && (
+          <ProgressReports items={workItems} requirements={requirements}
+            workItemsUrl={WORK_ITEMS_URL} requestJson={requestJson} />
+        )}
+      </main>
+    </div>
   );
 }
 

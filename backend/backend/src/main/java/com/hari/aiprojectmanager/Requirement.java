@@ -21,6 +21,12 @@ public class Requirement {
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
+    @Column(unique = true, length = 36)
+    private String draftSaveId;
+
+    @Column(columnDefinition = "LONGTEXT")
+    private String clarificationQuestions;
+
     // Required by JPA.
     public Requirement() {
     }
@@ -53,5 +59,18 @@ public class Requirement {
 
     public LocalDateTime getCreatedAt() {
         return createdAt;
+    }
+
+    String draftSaveId() {
+        return draftSaveId;
+    }
+
+    void recordDraftSave(String draftSaveId, String clarificationQuestions) {
+        this.draftSaveId = draftSaveId;
+        this.clarificationQuestions = clarificationQuestions;
+    }
+
+    public String getClarificationQuestions() {
+        return clarificationQuestions;
     }
 }

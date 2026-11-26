@@ -1,26 +1,44 @@
 package com.hari.aiprojectmanager;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
+import static com.hari.aiprojectmanager.WorkspaceAccount.SESSION_KEY;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/work-items")
-@CrossOrigin(origins = "http://localhost:5173")
 public class WorkItemController {
 
     private final WorkItemRepository workItemRepository;
     private final RequirementRepository requirementRepository;
+    private final TaskCommentRepository taskCommentRepository;
+    private final TaskStatusChangeRepository taskStatusChanges;
+    private final TaskNotifications notifications;
 
     public WorkItemController(
             WorkItemRepository workItemRepository,
-            RequirementRepository requirementRepository) {
+            RequirementRepository requirementRepository,
+            TaskCommentRepository taskCommentRepository,
+            TaskStatusChangeRepository taskStatusChanges,
+            TaskNotifications notifications) {
 
         this.workItemRepository = workItemRepository;
         this.requirementRepository = requirementRepository;
+        this.taskCommentRepository = taskCommentRepository;
+        this.taskStatusChanges = taskStatusChanges;
+        this.notifications = notifications;
     }
 
     // ADDED: Data received when creating a work item.
@@ -43,15 +61,145 @@ public class WorkItemController {
             WorkItem.Status status,
             WorkItem.Priority priority,
             Long requirementId,
-            Long parentId
+            Long parentId,
+            TeamMember assignee,
+            Instant createdAt,
+            LocalDate dueDate,
+            BigDecimal estimatedHours,
+            Integer storyPoints,
+            long commentCount
     ) {}
+
+    public record AssigneeRequest(TeamMember assignee) {}
+
+    public record StatusRequest(WorkItem.Status status, TeamMember completedBy) {}
+    public record StatusActivity(Long taskId, WorkItem.Status previousStatus,
+                                 WorkItem.Status status, TeamMember completedBy, Instant changedAt) {}
+
+    public record TaskDetailsRequest(String description, LocalDate dueDate, BigDecimal estimatedHours) {}
+    public record TaskCommentRequest(String body) {}
+    public record TaskCommentResponse(Long id, TeamMember author, String authorName, String body,
+                                      Instant createdAt, long commentCount) {}
+
+    @GetMapping("/status-history")
+    @Transactional(readOnly = true)
+    public List<StatusActivity> statusHistory(@SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        account.requireManager();
+        return taskStatusChanges.findAllByOrderByIdAsc().stream()
+                .map(change -> new StatusActivity(change.taskId(), change.previousStatus(),
+                        change.status(), change.completedBy(), change.changedAt()))
+                .toList();
+    }
+
+    @PutMapping("/{id}/details")
+    @Transactional
+    public WorkItemResponse updateDetails(@PathVariable Long id, @RequestBody TaskDetailsRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        LocalDate dueDate = request.dueDate();
+        if (dueDate != null && (dueDate.getYear() < 1000 || dueDate.getYear() > 9999)) {
+            throw badRequest("Choose a due date between years 1000 and 9999.");
+        }
+        BigDecimal hours = request.estimatedHours();
+        if (hours != null && (hours.signum() < 0 || hours.compareTo(new BigDecimal("999999.99")) > 0
+                || hours.stripTrailingZeros().scale() > 2)) {
+            throw badRequest("Estimated effort must be 0 to 999999.99 hours with at most two decimal places.");
+        }
+        WorkItem task = taskForUpdate(id);
+        account.requireTaskAccess(task);
+        task.updateDetails(request.description(), dueDate, hours);
+        return toResponse(task);
+    }
+
+    @GetMapping("/{id}/comments")
+    @Transactional(readOnly = true)
+    public List<TaskCommentResponse> comments(@PathVariable Long id, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        account.requireTaskAccess(requireTask(workItemRepository.findById(id)));
+        var comments = taskCommentRepository.findByTask_IdOrderByIdAsc(id);
+        return comments.stream()
+                .map(comment -> toCommentResponse(comment, comments.size()))
+                .toList();
+    }
+
+    @PostMapping("/{id}/comments")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Transactional
+    public TaskCommentResponse addComment(@PathVariable Long id, @RequestBody TaskCommentRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        if (request.body() == null || request.body().isBlank()) {
+            throw badRequest("Enter a comment.");
+        }
+        WorkItem task = taskForUpdate(id);
+        account.requireTaskAccess(task);
+        TeamMember author = account.isManager() ? TeamMember.MANAGER : account.member();
+        TaskComment comment = taskCommentRepository.save(new TaskComment(task, author, request.body().trim()));
+        notifications.queueComment(task, comment);
+        return toCommentResponse(comment, taskCommentRepository.countByTask_Id(id));
+    }
+
+    private TaskCommentResponse toCommentResponse(TaskComment comment, long count) {
+        return new TaskCommentResponse(comment.id(), comment.author(), comment.author().profile().name(),
+                comment.body(), comment.createdAt(), count);
+    }
+
+    @GetMapping("/team-members")
+    public List<TeamMember.Profile> teamMembers(@SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        account.requireManager();
+        return TeamMember.roster();
+    }
+
+    // TEAM ASSIGNMENT: Managers can move a saved task to any member of the roster.
+    @PatchMapping("/{id}/assignee")
+    @Transactional
+    public WorkItemResponse changeAssignee(@PathVariable Long id, @RequestBody AssigneeRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        account.requireManager();
+        if (request.assignee() == null || request.assignee() == TeamMember.MANAGER) {
+            throw badRequest("Choose a team member.");
+        }
+        WorkItem task = taskForUpdate(id);
+        account.requireTaskAccess(task);
+        task.setAssignee(request.assignee());
+        return toResponse(task);
+    }
+
+    // TASK STATUS: Save the selected status using the existing work_items status column.
+    @PatchMapping("/{id}/status")
+    @Transactional
+    public WorkItemResponse changeStatus(@PathVariable Long id, @RequestBody StatusRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        if (request.status() == null) {
+            throw badRequest("Choose a task status.");
+        }
+        WorkItem task = taskForUpdate(id);
+        account.requireTaskAccess(task);
+        if (task.getStatus() != request.status()) {
+            TeamMember completedBy = request.status() == WorkItem.Status.DONE
+                    ? (account.isManager()
+                        ? (request.completedBy() != null ? request.completedBy() : task.getAssignee())
+                        : account.member())
+                    : null;
+            taskStatusChanges.save(new TaskStatusChange(task, request.status(), completedBy));
+            task.setStatus(request.status());
+        }
+        return toResponse(task);
+    }
+
+    // Serialize updates to the same row so status and assignee changes can overlap safely.
+    private WorkItem taskForUpdate(Long id) {
+        return requireTask(workItemRepository.findForUpdateById(id));
+    }
+
+    private WorkItem requireTask(Optional<WorkItem> item) {
+        WorkItem task = item
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Work item not found."));
+        if (task.getType() != WorkItem.Type.TASK) {
+            throw badRequest("Only tasks can be updated on the board.");
+        }
+        return task;
+    }
 
     // ADDED: Create an epic, story, or task.
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     @Transactional
     public WorkItemResponse create(
-            @RequestBody CreateWorkItemRequest request) {
+            @RequestBody CreateWorkItemRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
 
         if (request.title() == null
                 || request.title().isBlank()
@@ -63,11 +211,10 @@ public class WorkItemController {
             );
         }
 
-        if (request.title().trim().length() > 255) {
-            throw badRequest(
-                    "Title must contain no more than 255 characters."
-            );
+        if (!account.isManager() && request.type() != WorkItem.Type.TASK) {
+            account.requireManager();
         }
+        validateTitle(request.title());
 
         Requirement requirement = requirementRepository
                 .findById(request.requirementId())
@@ -125,19 +272,133 @@ public class WorkItemController {
             }
         }
 
-        WorkItem item = new WorkItem();
-        item.setTitle(request.title().trim());
-        item.setDescription(request.description());
-        item.setType(request.type());
-        item.setRequirement(requirement);
-        item.setParent(parent);
+        return toResponse(persistItem(requirement, parent, request.type(), request.title(),
+                request.description(), request.priority(), account.member()));
+    }
 
-        // Use the entity's MEDIUM default if priority is omitted.
-        if (request.priority() != null) {
-            item.setPriority(request.priority());
+    public record DraftRequest(UUID saveId, Long requirementId, String projectName,
+                               String requirement, List<DraftEpic> epics,
+                               List<String> clarificationQuestions) {}
+
+    public record DraftEpic(String title, List<DraftStory> stories) {}
+
+    public record DraftStory(String title, String description, List<String> acceptanceCriteria,
+                             List<DraftTask> tasks) {}
+
+    public record DraftTask(String title, TeamMember.Role requiredRole, String requiredSkill, String description) {}
+
+    public record SavedDraft(Requirement requirement, List<WorkItemResponse> workItems) {}
+
+    // SAVE DRAFT: Persist the reviewed hierarchy and its requirement in one transaction.
+    @PostMapping("/draft")
+    @Transactional
+    public SavedDraft saveDraft(@RequestBody DraftRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        account.requireManager();
+        if (request.saveId() == null || request.projectName() == null
+                || request.projectName().isBlank() || request.projectName().trim().length() > 255
+                || request.requirement() == null || request.requirement().isBlank()
+                || request.epics() == null || request.epics().isEmpty()) {
+            throw badRequest("A save ID, project name (up to 255 characters), requirement, and epic are required.");
         }
 
-        return toResponse(workItemRepository.save(item));
+        String saveId = request.saveId().toString();
+        Requirement requirement = request.requirementId() == null
+                ? requirementRepository.findByDraftSaveId(saveId).orElse(null)
+                : requirementRepository.findForUpdateById(request.requirementId())
+                        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Requirement not found."));
+
+        if (requirement == null) {
+            requirement = new Requirement();
+            requirement.setProjectName(request.projectName().trim());
+            requirement.setDescription(request.requirement().trim());
+        } else {
+            if (!requirement.getProjectName().equals(request.projectName().trim())
+                    || !requirement.getDescription().equals(request.requirement().trim())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "The draft does not match the saved requirement.");
+            }
+            if (saveId.equals(requirement.draftSaveId())) {
+                return new SavedDraft(requirement, getAll(requirement.getId(), account));
+            }
+            if (requirement.draftSaveId() != null) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "This requirement already has a saved draft.");
+            }
+        }
+
+        requirement.recordDraftSave(saveId, formatLines(request.clarificationQuestions()));
+        try {
+            requirement = requirementRepository.saveAndFlush(requirement);
+        } catch (DataIntegrityViolationException error) {
+            // The unique save ID prevents duplicate writes when two copies of a request overlap.
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Draft save conflicted. Retry the same draft.");
+        }
+
+        List<WorkItemResponse> items = new ArrayList<>();
+        var assignment = new TeamMember.Assignment();
+        for (DraftEpic epic : request.epics()) {
+            if (epic == null || epic.stories() == null) {
+                throw badRequest("Every epic must include a story list.");
+            }
+            WorkItem epicItem = persistItem(requirement, null, WorkItem.Type.EPIC, epic.title(), null, null, null);
+            items.add(toResponse(epicItem));
+            for (DraftStory story : epic.stories()) {
+                if (story == null) {
+                    throw badRequest("A draft story cannot be empty.");
+                }
+                String description = story.description() == null ? "" : story.description().trim();
+                String criteria = formatLines(story.acceptanceCriteria());
+                if (!criteria.isEmpty()) {
+                    description = (description.isEmpty() ? "" : description + "\n\n")
+                            + "Acceptance criteria\n" + criteria;
+                }
+                WorkItem storyItem = persistItem(requirement, epicItem, WorkItem.Type.STORY,
+                        story.title(), description, null, null);
+                items.add(toResponse(storyItem));
+                if (story.tasks() != null) {
+                    for (DraftTask task : story.tasks()) {
+                        if (task == null) {
+                            throw badRequest("A draft task cannot be empty.");
+                        }
+                        var assignee = assignment.next(task.requiredRole(), task.requiredSkill(), task.title());
+                        var taskItem = persistItem(requirement, storyItem, WorkItem.Type.TASK,
+                                task.title(), task.description(), null, assignee);
+                        items.add(toResponse(taskItem, 0));
+                    }
+                }
+            }
+        }
+        return new SavedDraft(requirement, items);
+    }
+
+    private String formatLines(List<String> lines) {
+        if (lines == null) {
+            return "";
+        }
+        return String.join("\n", lines.stream()
+                .filter(line -> line != null && !line.isBlank())
+                .map(line -> "- " + line.trim())
+                .toList());
+    }
+
+    private WorkItem persistItem(Requirement requirement, WorkItem parent, WorkItem.Type type,
+                                 String title, String description, WorkItem.Priority priority, TeamMember assignee) {
+        validateTitle(title);
+        WorkItem item = new WorkItem();
+        item.setTitle(title.trim());
+        item.setDescription(description);
+        item.setType(type);
+        item.setRequirement(requirement);
+        item.setParent(parent);
+        item.setAssignee(assignee);
+        if (priority != null) {
+            item.setPriority(priority);
+        }
+        return workItemRepository.save(item);
+    }
+
+    private void validateTitle(String title) {
+        if (title == null || title.isBlank() || title.trim().length() > 255) {
+            throw badRequest("Each work item needs a title of 1 to 255 characters.");
+        }
     }
 
     // ADDED: List all work items, or filter by requirement.
@@ -149,24 +410,52 @@ public class WorkItemController {
             @RequestParam(
                     name = "requirementId",
                     required = false
-            ) Long requirementId) {
+            ) Long requirementId, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
 
         List<WorkItem> items;
 
-        if (requirementId == null) {
+        if (!account.isManager()) {
+            items = requirementId == null
+                    ? workItemRepository.findByTypeAndAssigneeOrderByIdAsc(WorkItem.Type.TASK, account.member())
+                    : workItemRepository.findByRequirement_IdAndTypeAndAssigneeOrderByIdAsc(
+                            requirementId, WorkItem.Type.TASK, account.member());
+        } else if (requirementId == null) {
             items = workItemRepository.findAll();
         } else {
             items = workItemRepository
                     .findByRequirement_IdOrderByIdAsc(requirementId);
         }
 
+        var counts = new HashMap<Long, Long>();
+        var taskIds = items.stream().filter(item -> item.getType() == WorkItem.Type.TASK)
+                .map(WorkItem::getId).toList();
+        if (!taskIds.isEmpty()) {
+            taskCommentRepository.countForTasks(taskIds)
+                    .forEach(count -> counts.put(count.getTaskId(), count.getTotal()));
+        }
         return items.stream()
-                .map(this::toResponse)
+                .map(item -> toResponse(item, counts.getOrDefault(item.getId(), 0L)))
+                .toList();
+    }
+
+    public record TaskParent(Long id, String title) {}
+
+    @GetMapping("/task-parents")
+    @Transactional(readOnly = true)
+    public List<TaskParent> taskParents(@RequestParam Long requirementId) {
+        return workItemRepository.findByRequirement_IdAndTypeOrderByIdAsc(requirementId, WorkItem.Type.STORY)
+                .stream()
+                .map(item -> new TaskParent(item.getId(), item.getTitle()))
                 .toList();
     }
 
     // ADDED: Convert the entity into a dashboard response.
     private WorkItemResponse toResponse(WorkItem item) {
+        return toResponse(item, item.getType() == WorkItem.Type.TASK
+                ? taskCommentRepository.countByTask_Id(item.getId()) : 0);
+    }
+
+    private WorkItemResponse toResponse(WorkItem item, long commentCount) {
         return new WorkItemResponse(
                 item.getId(),
                 item.getTitle(),
@@ -177,7 +466,13 @@ public class WorkItemController {
                 item.getRequirement().getId(),
                 item.getParent() == null
                         ? null
-                        : item.getParent().getId()
+                        : item.getParent().getId(),
+                item.getAssignee(),
+                item.getCreatedAt(),
+                item.getDueDate(),
+                item.getEstimatedHours(),
+                item.getStoryPoints(),
+                commentCount
         );
     }
 

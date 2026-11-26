@@ -6,9 +6,10 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 
+import static com.hari.aiprojectmanager.WorkspaceAccount.SESSION_KEY;
+
 @RestController
 @RequestMapping("/api/requirements")
-@CrossOrigin(origins = "http://localhost:5173")
 public class RequirementController {
 
     private final AiRequirementService aiRequirementService;
@@ -46,7 +47,9 @@ public class RequirementController {
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public Requirement save(
-            @RequestBody RequirementRequest request) {
+            @RequestBody RequirementRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+
+        account.requireManager();
 
         validate(request);
 
@@ -59,7 +62,9 @@ public class RequirementController {
 
     @PostMapping("/preview")
     public RequirementResponse preview(
-            @RequestBody RequirementRequest request) {
+            @RequestBody RequirementRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+
+        account.requireManager();
 
         validate(request);
 
@@ -72,7 +77,9 @@ public class RequirementController {
 
     @PostMapping("/analyze")
     public AnalysisResponse analyze(
-            @RequestBody RequirementRequest request) {
+            @RequestBody RequirementRequest request, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+
+        account.requireManager();
 
         validate(request);
 

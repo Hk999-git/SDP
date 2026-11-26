@@ -1,6 +1,9 @@
 package com.hari.aiprojectmanager;
 
 import jakarta.persistence.*;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
 
 @Entity
 @Table(name = "work_items")
@@ -37,6 +40,17 @@ public class WorkItem {
     @Column(columnDefinition = "LONGTEXT")
     private String description;
 
+    // TASK DETAILS: Nullable for work items created before creation dates were tracked.
+    @Column(updatable = false)
+    private Instant createdAt;
+
+    private LocalDate dueDate;
+
+    @Column(precision = 8, scale = 2)
+    private BigDecimal estimatedHours;
+
+    private Integer storyPoints;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private Type type;
@@ -48,6 +62,11 @@ public class WorkItem {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private Priority priority = Priority.MEDIUM;
+
+    // TEAM ASSIGNMENT: Existing and manually created tasks can start unassigned.
+    @Enumerated(EnumType.STRING)
+    @Column(name = "assignee")
+    private TeamMember assignee;
 
     // ADDED: Original business requirement behind this work item.
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
@@ -61,6 +80,24 @@ public class WorkItem {
     private WorkItem parent;
 
     public WorkItem() {
+    }
+
+    @PrePersist
+    private void recordCreationDate() {
+        if (createdAt == null) {
+            createdAt = Instant.now();
+        }
+    }
+
+    public Instant getCreatedAt() { return createdAt; }
+    public LocalDate getDueDate() { return dueDate; }
+    public BigDecimal getEstimatedHours() { return estimatedHours; }
+    public Integer getStoryPoints() { return storyPoints; }
+
+    public void updateDetails(String description, LocalDate dueDate, BigDecimal estimatedHours) {
+        this.description = description;
+        this.dueDate = dueDate;
+        this.estimatedHours = estimatedHours;
     }
 
     public Long getId() {
@@ -105,6 +142,14 @@ public class WorkItem {
 
     public void setPriority(Priority priority) {
         this.priority = priority;
+    }
+
+    public TeamMember getAssignee() {
+        return assignee;
+    }
+
+    public void setAssignee(TeamMember assignee) {
+        this.assignee = assignee;
     }
 
     public Requirement getRequirement() {
