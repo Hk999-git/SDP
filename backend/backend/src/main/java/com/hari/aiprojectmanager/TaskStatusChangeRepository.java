@@ -5,4 +5,5 @@ import java.util.List;
 
 interface TaskStatusChangeRepository extends JpaRepository<TaskStatusChange, Long> {
     List<TaskStatusChange> findAllByOrderByIdAsc();
+    List<TaskStatusChange> findByTask_IdOrderByIdDesc(Long taskId);
 }

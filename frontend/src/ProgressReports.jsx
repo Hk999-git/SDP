@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { calculateProgress, calendarDate, offsetDate } from "./progressMetrics";
+import { taskStatuses } from "./taskStatuses";
+import { TaskTable } from "./WorkspaceHome";
 
 const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 const monthDay = new Intl.DateTimeFormat(undefined, { timeZone: "UTC", month: "short", day: "numeric" });
@@ -30,12 +32,12 @@ function BurndownChart({ points }) {
           </g>
         ))}
         {points.length > 1 && (
-          <polyline fill="none" stroke="#2450b5" strokeWidth="3"
+          <polyline fill="none" stroke="#4f46e5" strokeWidth="3"
             points={points.map(({ open }, index) => x(index) + "," + y(open)).join(" ")} />
         )}
         {points.map((point, index) => (
           <g key={point.date + point.opening}>
-            <circle cx={x(index)} cy={y(point.open)} r="3.5" fill="#2450b5">
+            <circle cx={x(index)} cy={y(point.open)} r="3.5" fill="#4f46e5">
               <title>{pointLabel(point)} · {point.open} open tasks</title>
             </circle>
             {labels.has(index) && <text x={x(index)} y="201" textAnchor="middle">{pointLabel(point)}</text>}
@@ -52,6 +54,35 @@ function BurndownChart({ points }) {
         </table>
       </details>
     </>
+  );
+}
+
+function CompletionReport({ tasks, requirements }) {
+  const [selectedStatus, setSelectedStatus] = useState("");
+  const done = tasks.filter(({ status }) => status === "DONE").length;
+  const percent = tasks.length ? Math.round(100 * done / tasks.length) : 0;
+  const projects = new Map(requirements.map(({ id, projectName }) => [id, projectName]));
+  return (
+    <section className="panel completion-report" aria-label="Current task completion">
+      <h2>Current task completion</h2>
+      <div className="completion-summary">
+        <div className="completion-ring" style={{ "--completion": percent + "%" }} aria-hidden="true">
+          <div><strong>{percent}%</strong><span>complete</span></div>
+        </div>
+        <div className="report-breakdown">
+          <p>{done} of {tasks.length} tasks complete</p>
+          {taskStatuses.map(({ status, label, color }) => (
+            <button type="button" key={status} aria-pressed={status === selectedStatus} style={{ "--status-color": color }}
+              onClick={() => setSelectedStatus((current) => current === status ? "" : status)}>
+              <span>{label}</span><strong>{tasks.filter((task) => task.status === status).length}</strong>
+            </button>
+          ))}
+        </div>
+      </div>
+      {selectedStatus && (
+        <TaskTable tasks={tasks.filter(({ status }) => status === selectedStatus)} projects={projects} />
+      )}
+    </section>
   );
 }
 
@@ -93,6 +124,7 @@ export default function ProgressReports({ items, requirements, workItemsUrl, req
         <div><label htmlFor="reportTo">Through</label><input id="reportTo" type="date" min={start || undefined} max={today} value={end} onChange={(event) => setEnd(event.target.value)} /></div>
       </div>
 
+      <CompletionReport tasks={scopedItems.filter(({ type }) => type === "TASK")} requirements={requirements} />
       {!history && !historyError && <p role="status">Loading progress…</p>}
       {historyError && (
         <div role="alert">

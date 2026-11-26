@@ -1,19 +1,22 @@
 import { useState } from "react";
 import { taskStatuses } from "./taskStatuses";
+import { Avatar } from "./WorkspaceVisuals";
 
 const statusesById = new Map(taskStatuses.map((entry) => [entry.status, entry]));
-function MemberWorkload({ member, tasks, projects }) {
+function MemberWorkload({ member, tasks, projects, maxTasks }) {
   const name = member?.name ?? "Unassigned";
   const completed = tasks.filter((task) => task.status === "DONE").length;
 
   return (
     <section className="panel workload-card" aria-label={name}>
       <header className="workload-card-header">
-        <span className="workload-avatar" data-role={member?.role} aria-hidden="true">
-          {member ? name.split(" ").map((word) => word[0]).join("") : "—"}
-        </span>
+        <Avatar name={member?.name} role={member?.role} />
         <h2>{name}</h2>
       </header>
+      <div className="workload-progress">
+        <span>{tasks.length} assigned · {completed} complete</span>
+        <meter min="0" max={maxTasks} value={tasks.length} aria-label={name + " assigned tasks"} />
+      </div>
 
       {member?.skills.length > 0 && (
         <ul className="skill-list" aria-label={name + " skills"}>
@@ -22,11 +25,8 @@ function MemberWorkload({ member, tasks, projects }) {
       )}
 
       {tasks.length > 0 ? (
-        <>
-          <div className="workload-progress">
-            <span>{completed} of {tasks.length} done</span>
-            <progress value={completed} max={tasks.length} aria-label={name + " completion"} />
-          </div>
+        <details className="workload-drilldown">
+          <summary>View tasks ({tasks.length})</summary>
           <ul className="workload-tasks">
             {tasks.map((task) => (
               <li key={task.id}>
@@ -42,7 +42,7 @@ function MemberWorkload({ member, tasks, projects }) {
               </li>
             ))}
           </ul>
-        </>
+        </details>
       ) : (
         <p className="workload-empty">No assigned tasks.</p>
       )}
@@ -63,6 +63,7 @@ export default function TeamWorkload({ members, requirements, workItems }) {
     const assigned = tasksByMember.get(task.assignee);
     (assigned ?? unassigned).push(task);
   }
+  const maxTasks = Math.max(1, unassigned.length, ...Array.from(tasksByMember.values(), (assigned) => assigned.length));
 
   return (
     <div className="team-workload">
@@ -101,10 +102,11 @@ export default function TeamWorkload({ members, requirements, workItems }) {
             member={member}
             tasks={tasksByMember.get(member.id)}
             projects={projects}
+            maxTasks={maxTasks}
           />
         ))}
         {unassigned.length > 0 && (
-          <MemberWorkload tasks={unassigned} projects={projects} />
+          <MemberWorkload tasks={unassigned} projects={projects} maxTasks={maxTasks} />
         )}
       </div>
       {members.length === 0 && unassigned.length === 0 && <p className="panel">No team members available.</p>}

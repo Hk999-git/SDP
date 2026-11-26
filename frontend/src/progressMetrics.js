@@ -6,6 +6,10 @@ export function calendarDate(value = new Date()) {
   ].join("-");
 }
 
+export function isOverdue(task, today = calendarDate()) {
+  return Boolean(task.dueDate && task.dueDate < today && task.status !== "DONE");
+}
+
 export function offsetDate(date, days) {
   const value = new Date(date + "T00:00:00Z");
   value.setUTCDate(value.getUTCDate() + days);

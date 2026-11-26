@@ -110,9 +110,22 @@ public class WorkItemController {
     public List<StatusActivity> statusHistory(@SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
         account.requireManager();
         return taskStatusChanges.findAllByOrderByIdAsc().stream()
-                .map(change -> new StatusActivity(change.taskId(), change.previousStatus(),
-                        change.status(), change.completedBy(), change.changedAt()))
+                .map(this::toStatusActivity)
                 .toList();
+    }
+
+    @GetMapping("/{id}/status-history")
+    @Transactional(readOnly = true)
+    public List<StatusActivity> taskStatusHistory(@PathVariable Long id, @SessionAttribute(SESSION_KEY) WorkspaceAccount account) {
+        account.requireTaskAccess(requireTask(workItemRepository.findById(id)));
+        return taskStatusChanges.findByTask_IdOrderByIdDesc(id).stream()
+                .map(this::toStatusActivity)
+                .toList();
+    }
+
+    private StatusActivity toStatusActivity(TaskStatusChange change) {
+        return new StatusActivity(change.taskId(), change.previousStatus(),
+                change.status(), change.completedBy(), change.changedAt());
     }
 
     @PutMapping("/{id}/details")

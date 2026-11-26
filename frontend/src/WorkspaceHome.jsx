@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { taskStatuses } from "./taskStatuses";
+import { calendarDate, isOverdue } from "./progressMetrics";
+import { BrandMark, DueDate, Icon } from "./WorkspaceVisuals";
 
 const commentDateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
@@ -10,6 +12,7 @@ export function SignIn({ onLogin, error, busy }) {
   return (
     <main className="sign-in-page">
       <section className="panel sign-in-panel">
+        <BrandMark />
         <h1>Planova</h1>
         <h2>Sign in to your workspace</h2>
         <form onSubmit={(event) => { event.preventDefault(); onLogin(username.trim(), password); }}>
@@ -27,27 +30,55 @@ export function SignIn({ onLogin, error, busy }) {
   );
 }
 
+const dashboardStats = [
+  { label: "Total tasks", icon: "tasks", tone: "indigo" },
+  { label: "In progress", status: "IN_PROGRESS", icon: "clock", tone: "blue" },
+  { label: "Blocked", status: "BLOCKED", icon: "alert", tone: "red" },
+  { label: "Completed", status: "DONE", icon: "done", tone: "green" },
+];
+
 export function TaskDashboard({ tasks, requirements, isManager, commentsUrl, requestJson }) {
-  const names = new Map(requirements.map((requirement) => [requirement.id, requirement.projectName]));
+  const [filter, setFilter] = useState("");
+  const names = new Map(requirements.map(({ id, projectName }) => [id, projectName]));
+  const today = calendarDate();
+  const attention = tasks
+    .filter((task) => task.status === "BLOCKED" || isOverdue(task, today))
+    .sort((a, b) => (a.dueDate ?? "9999-12-31").localeCompare(b.dueDate ?? "9999-12-31"));
+  const shownTasks = filter ? tasks.filter((task) => task.status === filter) : tasks;
 
   return (
-    <>
-      <dl className="workload-summary dashboard-summary" aria-label="Task totals">
-        <div className="panel"><dt>Total tasks</dt><dd>{tasks.length}</dd></div>
-        {taskStatuses.map(({ status, label, color }) => (
-          <div className="panel" key={status} style={{ "--status-color": color }}>
-            <dt>{label}</dt><dd>{tasks.filter((task) => task.status === status).length}</dd>
+    <div className="dashboard-stack">
+      <dl className="dashboard-summary" aria-label="Task totals">
+        {dashboardStats.map(({ label, status = "", icon, tone }) => (
+          <div className="panel dashboard-stat" data-tone={tone} key={label}>
+            <dt><span className="stat-icon"><Icon name={icon} /></span>{label}</dt>
+            <dd><button type="button" aria-pressed={filter === status} aria-label={`Show ${label.toLowerCase()}`}
+              onClick={() => setFilter(status)}>{status ? tasks.filter((task) => task.status === status).length : tasks.length}</button></dd>
           </div>
         ))}
       </dl>
-      <div className="dashboard-content">
-        <section className="panel" aria-label="Task list">
+      <section className="panel attention-panel" aria-label="Needs attention">
+        <div className="section-heading">
+          <h2><Icon name="alert" /> Needs attention</h2>
+          <span className="section-count">{attention.length}</span>
+        </div>
+        {attention.length > 0 ? <TaskTable tasks={attention} projects={names} /> : <p>No blocked or overdue tasks.</p>}
+      </section>
+      <section className="panel" aria-label="Task list">
+        <div className="section-heading">
           <h2>{isManager ? "Project tasks" : "My tasks"}</h2>
-          <TaskTable tasks={tasks} projects={names} />
-        </section>
-        <RecentComments url={commentsUrl} requestJson={requestJson} />
-      </div>
-    </>
+          <div className="inline-filter">
+            <label htmlFor="dashboardStatus">Status</label>
+            <select id="dashboardStatus" value={filter} onChange={(event) => setFilter(event.target.value)}>
+              <option value="">All statuses</option>
+              {taskStatuses.map(({ status, label }) => <option key={status} value={status}>{label}</option>)}
+            </select>
+          </div>
+        </div>
+        <TaskTable tasks={shownTasks} projects={names} />
+      </section>
+      <RecentComments url={commentsUrl} requestJson={requestJson} />
+    </div>
   );
 }
 
@@ -79,7 +110,7 @@ function RecentComments({ url, requestJson }) {
   }
 
   return (
-    <section className="panel" aria-labelledby="dashboard-comments-heading">
+    <section className="panel dashboard-comments" aria-labelledby="dashboard-comments-heading">
       <header className="dashboard-comments-header">
         <h2 id="dashboard-comments-heading">Recent comments</h2>
         <button type="button" className="secondary-button" disabled={loading} onClick={() => loadPage(null)}>Refresh</button>
@@ -123,7 +154,7 @@ export function TaskTable({ tasks, projects, onUpdateStatus, updatesDisabled }) 
         <thead><tr><th>Task</th><th>Project</th><th>Status</th><th>Due date</th><th>Contributed by</th><th>Comments</th></tr></thead>
         <tbody>{tasks.map((task) => (
           <tr key={task.id}>
-            <td><a href={"#task/" + task.id}>#{task.id} {task.title}</a></td>
+            <td><a href={"#task/" + task.id}><span className="task-key">TASK-{task.id}</span> {task.title}</a></td>
             <td>{projects.get(task.requirementId) ?? "—"}</td>
             <td>{onUpdateStatus ? (
               <select aria-label={"Status for " + task.title} value={task.status} disabled={updatesDisabled}
@@ -135,7 +166,7 @@ export function TaskTable({ tasks, projects, onUpdateStatus, updatesDisabled }) 
                 {taskStatuses.find(({ status }) => status === task.status)?.label ?? task.status}
               </span>
             )}</td>
-            <td>{task.dueDate ?? "—"}</td>
+            <td><DueDate task={task} /></td>
             <td>{task.contributorName ?? "—"}</td>
             <td>{task.commentCount ?? 0}</td>
           </tr>
@@ -145,11 +176,11 @@ export function TaskTable({ tasks, projects, onUpdateStatus, updatesDisabled }) 
   );
 }
 
-export function NewTask({ requirements, workItemsUrl, requestJson, onCreated }) {
-  const [project, setProject] = useState("");
+export function NewTask({ requirements, workItemsUrl, requestJson, onCreated, initialProject = "" }) {
+  const [project, setProject] = useState(initialProject);
   const [parents, setParents] = useState([]);
   const [parent, setParent] = useState("");
-  const [loadingParents, setLoadingParents] = useState(false);
+  const [loadingParents, setLoadingParents] = useState(Boolean(initialProject));
   const [parentError, setParentError] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");

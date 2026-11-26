@@ -6,6 +6,8 @@ import WorkItemBoard from "./WorkItemBoard";
 import TeamWorkload from "./TeamWorkload";
 import TaskDetails from "./TaskDetails";
 import ProgressReports from "./ProgressReports";
+import DraftPreview from "./DraftPreview";
+import { Avatar, BrandMark, Icon } from "./WorkspaceVisuals";
 import { NewTask, SignIn, TaskDashboard, TaskTable } from "./WorkspaceHome";
 
 const API_URL = "http://localhost:8080/api";
@@ -40,7 +42,6 @@ function errorMessage(error) {
     : error.message;
 }
 
-// DRAFT PREVIEW: Validate model-generated fields before rendering them in React.
 function isValidDraft(analysis) {
   const isText = (value) => typeof value === "string";
   const isListOf = (value, check) => Array.isArray(value) && value.every(check);
@@ -58,62 +59,37 @@ function isValidDraft(analysis) {
   );
 }
 
-// DRAFT PREVIEW: Show work packages and clarification questions for review.
-function DraftPreview({ analysis, children }) {
-  const questions = analysis.clarificationQuestions ?? [];
+function hasDraftTitles({ epics }) {
+  const valid = ({ title }) => title.trim().length > 0 && title.trim().length <= 255;
+  return epics.length > 0 && epics.every((epic) => valid(epic) && epic.stories.every(
+    (story) => valid(story) && (story.tasks ?? []).every(valid)
+  ));
+}
+
+function TaskDrawer({ taskId, title, returnView, children }) {
+  const dialog = useRef(null);
+
+  useEffect(() => {
+    const element = dialog.current;
+    element.showModal();
+    return () => element.close();
+  }, []);
+
+  function closeDrawer() {
+    window.location.hash = returnView;
+  }
 
   return (
-    <section className="panel draft-panel" aria-labelledby="draft-heading">
-      <h2 id="draft-heading">Generated draft</h2>
-      {analysis.epics.length === 0 && <p>No epics were generated.</p>}
-
-      {analysis.epics.map((epic, epicIndex) => (
-        <article key={epicIndex} className="generated-epic">
-          <h3>Epic: {epic.title}</h3>
-          {epic.stories.map((story, storyIndex) => {
-            const criteria = story.acceptanceCriteria ?? [];
-            const tasks = story.tasks ?? [];
-            return (
-              <section key={storyIndex} className="generated-story">
-                <h4>Story: {story.title}</h4>
-                {story.description && <p>{story.description}</p>}
-                {criteria.length > 0 && (
-                  <>
-                    <h5>Acceptance criteria</h5>
-                    <ul>
-                      {criteria.map((criterion, index) => <li key={index}>{criterion}</li>)}
-                    </ul>
-                  </>
-                )}
-                {tasks.length > 0 && (
-                  <>
-                    <h5>Tasks</h5>
-                    <ul>
-                      {tasks.map((task, index) => (
-                        <li key={index}>
-                          {task.title}
-                          {task.assigneeName && <span> — {task.assigneeName}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </section>
-            );
-          })}
-        </article>
-      ))}
-
-      {questions.length > 0 && (
-        <>
-          <h3>Clarification questions</h3>
-          <ul>
-            {questions.map((question, index) => <li key={index}>{question}</li>)}
-          </ul>
-        </>
-      )}
+    <dialog ref={dialog} className="task-drawer" aria-labelledby="task-drawer-heading" onCancel={(event) => {
+      event.preventDefault();
+      closeDrawer();
+    }}>
+      <header className="task-drawer-header">
+        <div><span className="task-key">TASK-{taskId}</span><h2 id="task-drawer-heading">{title}</h2></div>
+        <button type="button" className="drawer-close" onClick={closeDrawer} aria-label="Close task details"><Icon name="close" /></button>
+      </header>
       {children}
-    </section>
+    </dialog>
   );
 }
 
@@ -189,37 +165,46 @@ function App() {
 
 function Workspace({ account, onLogout, logoutError }) {
   const isManager = account.role === "MANAGER";
-  const [view, setView] = useState(() => selectedView(isManager));
-  const [menuOpen, setMenuOpen] = useState(true);
+  const [{ view, taskId }, setNavigation] = useState(() => {
+    const route = selectedView(isManager);
+    return route.startsWith("task/")
+      ? { view: isManager ? "board" : "my-tasks", taskId: route.slice(5) }
+      : { view: route, taskId: null };
+  });
+  const [menuOpen, setMenuOpen] = useState(false);
   const sidebarScroll = useRef(null);
   const [canScrollSidebar, setCanScrollSidebar] = useState(false);
   const [taskProject, setTaskProject] = useState("");
 
   useEffect(() => {
     const region = sidebarScroll.current;
-    if (!menuOpen || !region) return;
+    if (!region) return;
 
     const updateScrollButton = () => {
       setCanScrollSidebar(region.scrollHeight - region.scrollTop - region.clientHeight > 1);
     };
     const observer = new ResizeObserver(updateScrollButton);
     observer.observe(region);
-    observer.observe(region.firstElementChild);
+    for (const group of region.children) observer.observe(group);
     region.addEventListener("scroll", updateScrollButton, { passive: true });
     return () => {
       observer.disconnect();
       region.removeEventListener("scroll", updateScrollButton);
     };
-  }, [menuOpen]);
+  }, []);
 
   useEffect(() => {
     const updateView = () => {
-      setView(selectedView(isManager));
-      window.scrollTo(0, 0);
+      const route = selectedView(isManager);
+      setNavigation((previous) => route.startsWith("task/")
+        ? { ...previous, taskId: route.slice(5) }
+        : { view: route, taskId: null });
     };
     window.addEventListener("hashchange", updateView);
     return () => window.removeEventListener("hashchange", updateView);
   }, [isManager]);
+
+  useEffect(() => { window.scrollTo(0, 0); }, [view]);
 
   const [projectName, setProjectName] = useState("");
   const [requirement, setRequirement] = useState("");
@@ -243,7 +228,6 @@ function Workspace({ account, onLogout, logoutError }) {
       ? { ...item, commentCount }
       : item));
   }, []);
-  const taskId = view.startsWith("task/") ? view.slice(5) : null;
   const openTask = taskId
     ? workItems.find((item) => item.type === "TASK" && String(item.id) === taskId)
     : null;
@@ -295,12 +279,18 @@ function Workspace({ account, onLogout, logoutError }) {
         const taskRequirementIds = new Set(
           savedWorkItems.filter((item) => item.type === "TASK").map((item) => item.requirementId)
         );
+        const openRoute = selectedView(isManager);
+        const linkedTask = openRoute.startsWith("task/")
+          ? savedWorkItems.find((item) => item.type === "TASK" && String(item.id) === openRoute.slice(5))
+          : null;
         setSelectedRequirementId((current) =>
           savedRequirements.some(
             (item) => String(item.id) === current
           )
             ? current
-            : String((savedRequirements.find((entry) => taskRequirementIds.has(entry.id)) ?? savedRequirements[0])?.id ?? "")
+            : String((savedRequirements.find((entry) => entry.id === linkedTask?.requirementId)
+                ?? savedRequirements.find((entry) => taskRequirementIds.has(entry.id))
+                ?? savedRequirements[0])?.id ?? "")
         );
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -455,8 +445,9 @@ function Workspace({ account, onLogout, logoutError }) {
 
   // SAVE DRAFT: Save the reviewed result and put its work items on the board.
   async function handleSaveDraft() {
-    if (busy || !currentDraft?.saveId || currentDraft.saved) return;
+    if (busy || !currentDraft?.saveId || currentDraft.saved || !hasDraftTitles(currentDraft.analysis)) return;
 
+    setDraft((previous) => ({ ...previous, attempted: true }));
     setDraftSaveError("");
     setSavingDraft(true);
     try {
@@ -473,6 +464,7 @@ function Workspace({ account, onLogout, logoutError }) {
               ...epic,
               stories: epic.stories.map((story) => ({
                 ...story,
+                acceptanceCriteria: story.acceptanceCriteria?.map((criterion) => criterion.trim()).filter(Boolean),
                 tasks: story.tasks?.map(({ title, requiredRole, requiredSkill, description }) => ({
                   title,
                   requiredRole,
@@ -620,82 +612,100 @@ function Workspace({ account, onLogout, logoutError }) {
     );
   }
 
+  const projectView = view === "board" || view === "work-packages";
+  const activeProject = projectView ? selectedRequirement : null;
+  const assignedIds = new Set(selectedItems.filter((item) => item.type === "TASK").map((item) => item.assignee));
+  const visibleTeam = activeProject ? teamMembers.filter((member) => assignedIds.has(member.id)) : teamMembers;
+  const pageTitle = isManager && view === "my-tasks" ? "Tasks" : sharedViews[view] ?? managerViews[view];
+  const managerNav = [
+    ["board", "board"], ["work-packages", "packages"], ["requirements", "spark"],
+    ["team", "team"], ["reports", "reports"],
+  ];
+
   return (
     <div className="workspace-layout">
       <aside className="workspace-sidebar">
-        <a className="workspace-brand" href="#dashboard">Planova</a>
-        <div className="workspace-identity">
-          <strong>{account.name}</strong>
-          <span>{isManager ? "Manager" : "Team member"}</span>
-          <button type="button" onClick={onLogout}>Sign out</button>
-          {logoutError && <p role="alert">{logoutError}</p>}
-        </div>
+        <a className="workspace-brand" href="#dashboard"><BrandMark /> <span>Planova</span></a>
         <button type="button" className="workspace-menu-toggle" aria-expanded={menuOpen}
           aria-controls="workspace-menu" onClick={() => setMenuOpen((open) => !open)}>Menu</button>
-        {menuOpen && (
-          <div className="workspace-menu-scroll" ref={sidebarScroll}>
-            <nav id="workspace-menu" aria-label="Workspace">
-              <a href="#dashboard" aria-current={view === "dashboard" ? "page" : undefined}>Dashboard</a>
-              <details className="workspace-projects">
-                <summary>Projects</summary>
-                {requirements.map((item) => (
-                  <a key={item.id} href={isManager ? "#board" : "#my-tasks"}
-                    onClick={() => {
-                      selectRequirement(String(item.id));
-                      setTaskProject(String(item.id));
-                    }}>
-                    {item.projectName}
-                  </a>
-                ))}
-                {!requirements.length && <p>No saved projects.</p>}
-              </details>
-              <a href="#my-tasks" onClick={() => setTaskProject("")}
-                aria-current={view === "my-tasks" ? "page" : undefined}>{isManager ? "Tasks" : "My Tasks"}</a>
-              <a href="#new-task" className="workspace-subnav" aria-current={view === "new-task" ? "page" : undefined}>Create new task</a>
-              {isManager && Object.entries(managerViews).map(([key, label]) => (
-                <a key={key} href={`#${key}`} aria-current={view === key ? "page" : undefined}>{label}</a>
-              ))}
-            </nav>
+        <nav ref={sidebarScroll} id="workspace-menu" data-expanded={menuOpen} aria-label="Workspace"
+          onClick={(event) => { if (event.target.closest("a")) setMenuOpen(false); }}>
+          <div className="nav-group">
+            <p className="nav-heading">Workspace</p>
+            <a href="#dashboard" aria-current={view === "dashboard" ? "page" : undefined}><Icon name="dashboard" /> Dashboard</a>
+            <a href="#my-tasks" onClick={() => setTaskProject("")} aria-current={view === "my-tasks" ? "page" : undefined}>
+              <Icon name="tasks" /> {isManager ? "Tasks" : "My Tasks"}
+            </a>
+            {isManager && managerNav.map(([key, icon]) => (
+              <a key={key} href={`#${key}`} aria-current={view === key ? "page" : undefined}>
+                <Icon name={icon} /> {managerViews[key]}
+              </a>
+            ))}
           </div>
-        )}
-        {menuOpen && canScrollSidebar && (
-          <button type="button" className="workspace-scroll-down" aria-label="Scroll sidebar down"
-            onClick={() => sidebarScroll.current?.scrollBy({ top: 180 })}>
-            <span aria-hidden="true">⌄</span>
-          </button>
-        )}
+          <details className="workspace-projects" open>
+            <summary>Projects</summary>
+            {requirements.map((item) => (
+              <a key={item.id} href={isManager ? "#board" : "#my-tasks"}
+                data-selected={(projectView && selectedRequirementId === String(item.id))
+                  || (view === "my-tasks" && taskProject === String(item.id))}
+                onClick={() => {
+                  selectRequirement(String(item.id));
+                  setTaskProject(String(item.id));
+                }}>
+                <span className="project-dot" /> {item.projectName}
+              </a>
+            ))}
+            {!requirements.length && <p>No saved projects.</p>}
+          </details>
+        </nav>
+        <button type="button" className="workspace-scroll-down" aria-label="Scroll sidebar down"
+          disabled={!canScrollSidebar}
+          onClick={() => sidebarScroll.current?.scrollBy({ top: 180 })}>
+          <span aria-hidden="true">⌄</span>
+        </button>
+        <details className="workspace-identity">
+          <summary><Avatar name={account.name} />
+            <span className="account-copy"><strong>{account.name}</strong><small>{isManager ? "Manager" : "Team member"}</small></span>
+          </summary>
+          <button type="button" onClick={onLogout}>Sign out</button>
+          {logoutError && <p role="alert">{logoutError}</p>}
+        </details>
       </aside>
 
       <main className="workspace-main">
-        <header className="page-header">
-          {taskId ? (
-            <div className="task-page-heading">
-              <a href={isManager ? "#board" : "#my-tasks"} onClick={() => openTask && selectRequirement(String(openTask.requirementId))}>
-                {isManager ? "Back to board" : "Back to My Tasks"}
-              </a>
-              <p>Task #{taskId}</p>
-              <h1>{openTask?.title ?? "Task"}</h1>
+        <header className="page-header workspace-header">
+          <div className="workspace-header-title">
+            {activeProject && <p className="page-context">Projects / {pageTitle}</p>}
+            <h1>{activeProject?.projectName ?? pageTitle}</h1>
+          </div>
+          <div className="header-actions">
+            {visibleTeam.length > 0 && <ul className="avatar-stack" aria-label={activeProject ? "Assigned team" : "Workspace team"}>
+              {visibleTeam.slice(0, 5).map((member) => <li key={member.id} aria-label={member.name}><Avatar name={member.name} role={member.role} /></li>)}
+              {visibleTeam.length > 5 && <li className="avatar-overflow" aria-label={`${visibleTeam.length - 5} more team members`}>+{visibleTeam.length - 5}</li>}
+            </ul>}
+            {isManager && view !== "requirements" && <a className="action-link action-secondary" href="#requirements">
+              <Icon name="spark" /> Generate with AI
+            </a>}
+            {view !== "new-task" && <a className="action-link" href="#new-task"><Icon name="plus" /> New Task</a>}
+          </div>
+        </header>
+
+        {projectView && (
+          <div className="project-toolbar">
+            <div className="project-tabs" aria-label="Project views">
+              <a href="#board" aria-current={view === "board" ? "page" : undefined}><Icon name="board" /> Board</a>
+              <a href="#work-packages" aria-current={view === "work-packages" ? "page" : undefined}><Icon name="packages" /> Work packages</a>
             </div>
-          ) : <h1>{isManager && view === "my-tasks" ? "Tasks" : sharedViews[view] ?? managerViews[view]}</h1>}
-          {(view === "board" || view === "work-packages") && (
-            <div className="requirement-picker">
-              <label htmlFor="selectedRequirement">Requirement</label>
-              <select
-                id="selectedRequirement"
-                value={selectedRequirementId}
-                disabled={busy || Boolean(listError)}
-                onChange={(event) => selectRequirement(event.target.value)}
-              >
-                <option value="">Select a requirement</option>
-                {requirements.map((item) => (
-                  <option key={item.id} value={String(item.id)}>
-                    #{item.id} — {item.projectName}
-                  </option>
-                ))}
+            <div className="inline-filter">
+              <label htmlFor="boardProject">Project</label>
+              <select id="boardProject" value={selectedRequirementId} disabled={busy || Boolean(listError)}
+                onChange={(event) => selectRequirement(event.target.value)}>
+                <option value="">Select a project</option>
+                {requirements.map((item) => <option key={item.id} value={String(item.id)}>{item.projectName}</option>)}
               </select>
             </div>
-          )}
-        </header>
+          </div>
+        )}
 
         {listLoading && <p role="status">Loading saved data…</p>}
         {listError && (
@@ -705,24 +715,6 @@ function Workspace({ account, onLogout, logoutError }) {
               Retry loading
             </button>
           </div>
-        )}
-
-        {taskId && !listLoading && !listError && (
-          openTask ? (
-            <TaskDetails
-              key={openTask.id}
-              task={openTask}
-              account={account}
-              teamMembers={teamMembers}
-              taskUrl={WORK_ITEMS_URL + "/" + openTask.id}
-              requestJson={requestJson}
-              onCommentCount={updateCommentCount}
-              onUpdated={({ id, description, dueDate, estimatedHours }) => setWorkItems((items) =>
-                items.map((item) => item.id === id ? { ...item, description, dueDate, estimatedHours } : item)
-              )}
-              onAssignmentUpdated={updateAssignment}
-            />
-          ) : <p className="panel">Task not found.</p>
         )}
 
         {view === "dashboard" && !listLoading && !listError && (
@@ -743,7 +735,6 @@ function Workspace({ account, onLogout, logoutError }) {
                 <option value="">All projects</option>
                 {requirements.map((item) => <option key={item.id} value={item.id}>{item.projectName}</option>)}
               </select>
-              <a href="#new-task">Create new task</a>
             </div>
             {taskUpdateError && <p role="alert">{taskUpdateError}</p>}
             <TaskTable
@@ -756,9 +747,13 @@ function Workspace({ account, onLogout, logoutError }) {
         )}
 
         {view === "new-task" && !listLoading && !listError && (
-          <NewTask requirements={requirements} workItemsUrl={WORK_ITEMS_URL} requestJson={requestJson}
+          <NewTask requirements={requirements} initialProject={selectedRequirementId} workItemsUrl={WORK_ITEMS_URL} requestJson={requestJson}
             onCreated={(task) => {
               setWorkItems((items) => [...items, task]);
+              const projectId = String(task.requirementId);
+              selectRequirement(projectId);
+              setTaskProject(projectId);
+              setNavigation({ view: isManager ? "board" : "my-tasks", taskId: String(task.id) });
               window.location.hash = "task/" + task.id;
             }} />
         )}
@@ -766,6 +761,7 @@ function Workspace({ account, onLogout, logoutError }) {
         {view === "board" && !listLoading && !listError && (
           selectedRequirement ? (
             <WorkItemBoard
+              key={selectedRequirementId}
               workItems={selectedItems}
               teamMembers={teamMembers}
               taskUpdatesDisabled={busy}
@@ -1004,7 +1000,7 @@ function Workspace({ account, onLogout, logoutError }) {
                     onClick={handleGenerateDraft}
                     disabled={busy || !projectName.trim() || !requirement.trim() || currentDraft?.saved}
                   >
-                    {generating ? "Generating…" : "Generate draft"}
+                    <Icon name="spark" /> {generating ? "Generating…" : "Generate with AI"}
                   </button>
                   <button
                     type="submit"
@@ -1023,12 +1019,23 @@ function Workspace({ account, onLogout, logoutError }) {
               )}
             </section>
             {currentDraft && (
-              <DraftPreview analysis={currentDraft.analysis}>
+              <DraftPreview analysis={currentDraft.analysis} editable={!currentDraft.attempted} disabled={busy}
+                onEdit={(path, value) => {
+                  setDraft((previous) => {
+                    const analysis = structuredClone(previous.analysis);
+                    const parent = path.slice(0, -1).reduce((node, key) => node[key], analysis);
+                    parent[path.at(-1)] = value;
+                    return { ...previous, analysis };
+                  });
+                }}>
+                {!hasDraftTitles(currentDraft.analysis) && currentDraft.analysis.epics.length > 0 && (
+                  <p role="status">Give every epic, story, and task a title of up to 255 characters.</p>
+                )}
                 <div className="requirement-actions">
                   <button
                     type="button"
                     onClick={handleSaveDraft}
-                    disabled={busy || currentDraft.saved || currentDraft.analysis.epics.length === 0}
+                    disabled={busy || currentDraft.saved || !hasDraftTitles(currentDraft.analysis)}
                   >
                     {savingDraft ? "Saving draft…" : currentDraft.saved ? "Saved to board" : "Save draft to board"}
                   </button>
@@ -1052,6 +1059,23 @@ function Workspace({ account, onLogout, logoutError }) {
             workItemsUrl={WORK_ITEMS_URL} requestJson={requestJson} />
         )}
       </main>
+      {taskId && <TaskDrawer key={taskId} taskId={taskId} title={openTask?.title ?? "Task details"} returnView={view}>
+        {listLoading ? <p role="status">Loading task…</p> : listError ? <p role="alert">{listError}</p> : openTask ? (
+          <TaskDetails
+            key={openTask.id}
+            task={openTask}
+            account={account}
+            teamMembers={teamMembers}
+            taskUrl={WORK_ITEMS_URL + "/" + openTask.id}
+            requestJson={requestJson}
+            onCommentCount={updateCommentCount}
+            onUpdated={({ id, description, dueDate, estimatedHours }) => setWorkItems((items) =>
+              items.map((item) => item.id === id ? { ...item, description, dueDate, estimatedHours } : item)
+            )}
+            onAssignmentUpdated={updateAssignment}
+          />
+        ) : <p className="panel">Task not found.</p>}
+      </TaskDrawer>}
     </div>
   );
 }

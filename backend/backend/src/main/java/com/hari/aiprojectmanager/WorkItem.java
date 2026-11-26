@@ -21,7 +21,8 @@ public class WorkItem {
         TO_DO,
         IN_PROGRESS,
         IN_REVIEW,
-        DONE
+        DONE,
+        BLOCKED
     }
 
     public enum Priority {

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { taskStatuses } from "./taskStatuses";
 
+const statuses = new Map(taskStatuses.map(({ status, label }) => [status, label]));
 const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, onUpdated, onAssignmentUpdated,
@@ -20,6 +21,20 @@ export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, o
   const [postError, setPostError] = useState("");
   const [assigning, setAssigning] = useState(false);
   const [assignmentError, setAssignmentError] = useState("");
+  const [activity, setActivity] = useState({ entries: null, error: "" });
+  const [activityAttempt, setActivityAttempt] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestJson(taskUrl + "/status-history", { signal: controller.signal })
+      .then((entries) => {
+        if (!controller.signal.aborted) setActivity({ entries, error: "" });
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setActivity({ entries: null, error: error.message });
+      });
+    return () => controller.abort();
+  }, [taskUrl, requestJson, activityAttempt, task.status]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -109,49 +124,48 @@ export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, o
   return (
     <div className="task-detail-layout">
       <section className="panel task-detail-panel" aria-label="Task details">
-        <h2>Task details</h2>
-        <dl className="task-metadata">
-          <div><dt>Status</dt><dd>{taskStatuses.find((entry) => entry.status === task.status)?.label ?? task.status}</dd></div>
-          {account.role === "MANAGER" ? (
-          <div>
-            <dt><label htmlFor="taskAssignee">Assignee</label></dt>
-            <dd>
-              <select id="taskAssignee" value={task.assignee ?? ""} disabled={assigning}
-                onChange={(event) => changeAssignment("assignee", event.target.value)}>
-                <option value="" disabled>Unassigned</option>
-                {teamMembers.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
-              </select>
-            </dd>
-          </div>
-          ) : <div><dt>Assignee</dt><dd>{task.assigneeName ?? "Unassigned"}</dd></div>}
-          {account.role === "MANAGER" ? (
-            <div>
-              <dt><label htmlFor="taskContributor">Contributed by</label></dt>
-              <dd>
-                <select id="taskContributor" value={task.contributor ?? ""} disabled={assigning}
-                  onChange={(event) => changeAssignment("contributor", event.target.value || null)}>
-                  <option value="">No contributor</option>
-                  {teamMembers.filter((member) => member.id !== task.assignee).map((member) => (
-                    <option key={member.id} value={member.id}>{member.name}</option>
-                  ))}
-                </select>
-              </dd>
-            </div>
-          ) : <div><dt>Contributed by</dt><dd>{task.contributorName ?? "—"}</dd></div>}
-          <div><dt>Created</dt><dd>{task.createdAt ? dateTime.format(new Date(task.createdAt)) : "Date unavailable"}</dd></div>
-        </dl>
-        {assignmentError && <p role="alert">{assignmentError}</p>}
-
+        <h3>Details</h3>
         <form onSubmit={saveDetails}>
+          <dl className="task-metadata">
+            <div><dt>Status</dt><dd><span className="workload-status" data-status={task.status}>{statuses.get(task.status) ?? task.status}</span></dd></div>
+            {account.role === "MANAGER" ? (
+              <div>
+                <dt><label htmlFor="taskAssignee">Assignee</label></dt>
+                <dd>
+                  <select id="taskAssignee" value={task.assignee ?? ""} disabled={assigning}
+                    onChange={(event) => changeAssignment("assignee", event.target.value)}>
+                    <option value="" disabled>Unassigned</option>
+                    {teamMembers.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
+                  </select>
+                </dd>
+              </div>
+            ) : <div><dt>Assignee</dt><dd>{task.assigneeName ?? "Unassigned"}</dd></div>}
+            {account.role === "MANAGER" ? (
+              <div>
+                <dt><label htmlFor="taskContributor">Contributed by</label></dt>
+                <dd>
+                  <select id="taskContributor" value={task.contributor ?? ""} disabled={assigning}
+                    onChange={(event) => changeAssignment("contributor", event.target.value || null)}>
+                    <option value="">No contributor</option>
+                    {teamMembers.filter((member) => member.id !== task.assignee).map((member) => (
+                      <option key={member.id} value={member.id}>{member.name}</option>
+                    ))}
+                  </select>
+                </dd>
+              </div>
+            ) : <div><dt>Contributed by</dt><dd>{task.contributorName ?? "—"}</dd></div>}
+            <div>
+              <dt><label htmlFor="taskDueDate">Due date</label></dt>
+              <dd><input id="taskDueDate" type="date" min="1000-01-01" max="9999-12-31" value={dueDate} disabled={saving}
+                onChange={(event) => { setDueDate(event.target.value); setSaved(false); }} /></dd>
+            </div>
+          </dl>
+          {assignmentError && <p role="alert">{assignmentError}</p>}
+
           <label htmlFor="taskDescription">Description</label>
           <textarea id="taskDescription" rows={8} value={description} disabled={saving}
             onChange={(event) => { setDescription(event.target.value); setSaved(false); }} />
           <div className="task-planning-fields">
-            <div>
-              <label htmlFor="taskDueDate">Due date</label>
-              <input id="taskDueDate" type="date" min="1000-01-01" max="9999-12-31"
-                value={dueDate} disabled={saving} onChange={(event) => { setDueDate(event.target.value); setSaved(false); }} />
-            </div>
             <div>
               <label htmlFor="taskEstimatedHours">Estimated effort (hours)</label>
               <input id="taskEstimatedHours" type="number" min="0" max="999999.99" step=".01"
@@ -165,7 +179,7 @@ export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, o
       </section>
 
       <section className="panel" aria-label="Comments">
-        <h2>Comments <span className="section-count">{comments.length}</span></h2>
+        <h3>Comments <span className="section-count">{comments.length}</span></h3>
         {loadingComments && <p role="status">Loading comments…</p>}
         {commentError && (
           <div role="alert">
@@ -200,6 +214,34 @@ export default function TaskDetails({ task, teamMembers, taskUrl, requestJson, o
           </button>
           {postError && <p role="alert">{postError}</p>}
         </form>
+      </section>
+
+      <section className="panel" aria-label="Task activity">
+        <h3>Activity</h3>
+        {!activity.entries && !activity.error && <p role="status">Loading activity…</p>}
+        {activity.error && (
+          <div role="alert">
+            <p>{activity.error}</p>
+            <button type="button" onClick={() => {
+              setActivity({ entries: null, error: "" });
+              setActivityAttempt((attempt) => attempt + 1);
+            }}>Retry loading activity</button>
+          </div>
+        )}
+        {(activity.entries?.length > 0 || task.createdAt) && <ol className="task-comments">
+          {activity.entries?.map(({ previousStatus, status, changedAt }, index) => (
+            <li key={changedAt + "-" + index}>
+              <div className="task-comment-meta">
+                <strong>{statuses.get(previousStatus) ?? previousStatus} → {statuses.get(status) ?? status}</strong>
+                <time dateTime={changedAt}>{dateTime.format(new Date(changedAt))}</time>
+              </div>
+            </li>
+          ))}
+          {task.createdAt && <li className="task-comment-meta">
+            <strong>Task created</strong><time dateTime={task.createdAt}>{dateTime.format(new Date(task.createdAt))}</time>
+          </li>}
+        </ol>}
+        {activity.entries?.length === 0 && !task.createdAt && <p>No activity recorded yet.</p>}
       </section>
     </div>
   );
